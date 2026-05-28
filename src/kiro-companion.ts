@@ -2,10 +2,9 @@ import { execSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const JOBS_DIR = join(tmpdir(), "kiro-plugin-cc-jobs");
-
-interface Job {
+export interface Job {
   id: string;
   kind: string;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -15,40 +14,76 @@ interface Job {
   pid?: number;
 }
 
+export function getJobsDir(): string {
+  return process.env.KIRO_PLUGIN_JOBS_DIR || join(tmpdir(), "kiro-plugin-cc-jobs");
+}
+
 function ensureJobsDir(): void {
-  if (!existsSync(JOBS_DIR)) mkdirSync(JOBS_DIR, { recursive: true });
+  const dir = getJobsDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
 function genId(): string {
-  return `kiro-${Date.now().toString(36)}`;
+  return `kiro-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function saveJob(job: Job): void {
+export function saveJob(job: Job): void {
   ensureJobsDir();
-  writeFileSync(join(JOBS_DIR, `${job.id}.json`), JSON.stringify(job, null, 2));
+  writeFileSync(join(getJobsDir(), `${job.id}.json`), JSON.stringify(job, null, 2));
 }
 
-function loadJob(id: string): Job | null {
-  const p = join(JOBS_DIR, `${id}.json`);
+export function loadJob(id: string): Job | null {
+  const p = join(getJobsDir(), `${id}.json`);
   if (!existsSync(p)) return null;
   return JSON.parse(readFileSync(p, "utf-8")) as Job;
 }
 
-function listJobs(): Job[] {
+export function listJobs(): Job[] {
   ensureJobsDir();
-  return readdirSync(JOBS_DIR)
-    .filter((f: string) => f.endsWith(".json"))
-    .map((f: string) => JSON.parse(readFileSync(join(JOBS_DIR, f), "utf-8")) as Job)
-    .sort((a: Job, b: Job) => b.startedAt.localeCompare(a.startedAt));
+  return readdirSync(getJobsDir())
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => JSON.parse(readFileSync(join(getJobsDir(), f), "utf-8")) as Job)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
-function findKiro(): string | null {
+export function findKiro(): string | null {
+  if (process.env.KIRO_CLI_PATH) return process.env.KIRO_CLI_PATH;
   try {
     const p = execSync("which kiro-cli", { encoding: "utf-8" }).trim();
     return p || null;
   } catch {
     return null;
   }
+}
+
+export function buildReviewPrompt(args: string[]): string {
+  let base = "HEAD";
+  const filtered: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--background" || a === "--wait") continue;
+    if (a === "--base") {
+      base = args[i + 1] ?? "HEAD";
+      i++;
+      continue;
+    }
+    filtered.push(a);
+  }
+  const extra = filtered.join(" ").trim();
+  let prompt = `Review the code changes. Compare against ${base}.`;
+  if (extra) prompt += ` Focus on: ${extra}`;
+  prompt += " Provide a thorough code review covering correctness, security, performance, and style.";
+  return prompt;
+}
+
+export function buildRescuePrompt(args: string[]): string {
+  const filtered = args.filter((a) => !["--background", "--wait"].includes(a));
+  const task = filtered.join(" ").trim();
+  return task || "Investigate and fix the current issue.";
+}
+
+export function hasFlag(args: string[], flag: string): boolean {
+  return args.includes(flag);
 }
 
 function runKiro(args: string[], background = false): string {
@@ -99,7 +134,7 @@ function runKiro(args: string[], background = false): string {
 
 // --- Commands ---
 
-function setup(args: string[]): string {
+export function setup(args: string[]): string {
   const kiro = findKiro();
   const json = args.includes("--json");
   const info = {
@@ -117,30 +152,19 @@ function setup(args: string[]): string {
   return `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version ?? "unknown"}`;
 }
 
-function review(args: string[]): string {
+export function review(args: string[]): string {
   const prompt = buildReviewPrompt(args);
-  const bg = args.includes("--background");
+  const bg = hasFlag(args, "--background");
   return runKiro([prompt], bg);
 }
 
-function buildReviewPrompt(args: string[]): string {
-  const base = args.find((_, i, a) => a[i - 1] === "--base") ?? "HEAD";
-  const filtered = args.filter(a => !["--background", "--wait", "--base"].includes(a) && a !== base);
-  const extra = filtered.join(" ");
-  let prompt = `Review the code changes. Compare against ${base}.`;
-  if (extra) prompt += ` Focus on: ${extra}`;
-  prompt += " Provide a thorough code review covering correctness, security, performance, and style.";
-  return prompt;
-}
-
-function rescue(args: string[]): string {
-  const bg = args.includes("--background");
-  const filtered = args.filter(a => !["--background", "--wait"].includes(a));
-  const task = filtered.join(" ") || "Investigate and fix the current issue.";
+export function rescue(args: string[]): string {
+  const bg = hasFlag(args, "--background");
+  const task = buildRescuePrompt(args);
   return runKiro([task], bg);
 }
 
-function status(args: string[]): string {
+export function status(args: string[]): string {
   const id = args[0];
   if (id) {
     const job = loadJob(id);
@@ -152,13 +176,12 @@ function status(args: string[]): string {
   return JSON.stringify(jobs.slice(0, 10), null, 2);
 }
 
-function result(args: string[]): string {
+export function result(args: string[]): string {
   const id = args[0];
   if (!id) {
-    const jobs = listJobs().filter(j => j.status === "completed");
+    const jobs = listJobs().filter((j) => j.status === "completed");
     if (jobs.length === 0) return "No completed jobs found.";
-    const latest = jobs[0]!;
-    return latest.result ?? "No result stored.";
+    return jobs[0]!.result ?? "No result stored.";
   }
   const job = loadJob(id);
   if (!job) return `No job found with ID: ${id}`;
@@ -166,22 +189,17 @@ function result(args: string[]): string {
   return job.result ?? "No result stored.";
 }
 
-function cancel(args: string[]): string {
+export function cancel(args: string[]): string {
   const id = args[0];
+  let job: Job | null;
   if (!id) {
-    const jobs = listJobs().filter(j => j.status === "running");
-    if (jobs.length === 0) return "No running jobs to cancel.";
-    const job = jobs[0]!;
-    if (job.pid) {
-      try { process.kill(job.pid); } catch { /* already dead */ }
-    }
-    job.status = "cancelled";
-    job.finishedAt = new Date().toISOString();
-    saveJob(job);
-    return `Cancelled job ${job.id}`;
+    const running = listJobs().filter((j) => j.status === "running");
+    if (running.length === 0) return "No running jobs to cancel.";
+    job = running[0]!;
+  } else {
+    job = loadJob(id);
+    if (!job) return `No job found with ID: ${id}`;
   }
-  const job = loadJob(id);
-  if (!job) return `No job found with ID: ${id}`;
   if (job.pid) {
     try { process.kill(job.pid); } catch { /* already dead */ }
   }
@@ -193,14 +211,41 @@ function cancel(args: string[]): string {
 
 // --- Main ---
 
-const [command, ...commandArgs] = process.argv.slice(2);
+export function dispatch(command: string | undefined, args: string[]): string {
+  switch (command) {
+    case "setup": return setup(args);
+    case "review": return review(args);
+    case "rescue": case "task": return rescue(args);
+    case "status": return status(args);
+    case "result": return result(args);
+    case "cancel": return cancel(args);
+    default: return `Unknown command: ${command}\nUsage: kiro-companion <setup|review|rescue|status|result|cancel> [args...]`;
+  }
+}
 
-switch (command) {
-  case "setup": console.log(setup(commandArgs)); break;
-  case "review": console.log(review(commandArgs)); break;
-  case "rescue": case "task": console.log(rescue(commandArgs)); break;
-  case "status": console.log(status(commandArgs)); break;
-  case "result": console.log(result(commandArgs)); break;
-  case "cancel": console.log(cancel(commandArgs)); break;
-  default: console.log(`Unknown command: ${command}\nUsage: kiro-companion <setup|review|rescue|status|result|cancel> [args...]`);
+function isMain(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  } catch {
+    return false;
+  }
+}
+
+// Also handle being invoked through the .mjs shim that imports this file.
+function isMainOrShim(): boolean {
+  if (isMain()) return true;
+  // The .mjs shim lives one level up at scripts/kiro-companion.mjs
+  if (!process.argv[1]) return false;
+  try {
+    const invoked = fileURLToPath(pathToFileURL(process.argv[1]).href);
+    return invoked.endsWith("kiro-companion.mjs");
+  } catch {
+    return false;
+  }
+}
+
+if (isMainOrShim()) {
+  const [command, ...commandArgs] = process.argv.slice(2);
+  console.log(dispatch(command, commandArgs));
 }
