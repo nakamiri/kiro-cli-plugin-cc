@@ -35,11 +35,7 @@ Then run:
 /kiro:setup
 ```
 
-If kiro-cli is not installed:
-
-```bash
-npm install -g @anthropic-ai/kiro-cli
-```
+If kiro-cli is not installed, see https://kiro.dev to download and install Kiro CLI.
 
 ## Usage
 

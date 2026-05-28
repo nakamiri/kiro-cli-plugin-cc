@@ -111,7 +111,7 @@ function setup(args: string[]): string {
     } catch { /* ignore */ }
   }
   if (json) return JSON.stringify(info);
-  if (!info.installed) return "❌ kiro-cli is not installed.\n\nInstall: npm install -g @anthropic-ai/kiro-cli\nOr see: https://github.com/anthropics/kiro-cli";
+  if (!info.installed) return "❌ kiro-cli is not installed.\n\nSee https://kiro.dev to download and install Kiro CLI.";
   return `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version ?? "unknown"}`;
 }
 
