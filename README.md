@@ -4,12 +4,12 @@ Use Kiro CLI from inside Claude Code for code reviews or to delegate tasks.
 
 ## What You Get
 
-- `/kiro:review` — run a Kiro CLI code review on your current changes
-- `/kiro:rescue` — delegate investigation or fix work to Kiro CLI
-- `/kiro:status` — show running and recent Kiro jobs
-- `/kiro:result` — show the final output of a completed job
-- `/kiro:cancel` — cancel an active background job
-- `/kiro:setup` — check whether kiro-cli is installed and ready
+- `/kiro-cli:review` — run a Kiro CLI code review on your current changes
+- `/kiro-cli:rescue` — delegate investigation or fix work to Kiro CLI
+- `/kiro-cli:status` — show running and recent Kiro jobs
+- `/kiro-cli:result` — show the final output of a completed job
+- `/kiro-cli:cancel` — cancel an active background job
+- `/kiro-cli:setup` — check whether kiro-cli is installed and ready
 
 ## Requirements
 
@@ -19,11 +19,11 @@ Use Kiro CLI from inside Claude Code for code reviews or to delegate tasks.
 ## Install
 
 ```bash
-# Add the marketplace (once you have a marketplace URL)
+# Add the marketplace
 /plugin marketplace add nakamiri/kiro-cli-plugin-cc
 
 # Install the plugin
-/plugin install kiro@nakamiri-kiro
+/plugin install kiro-cli@kiro-cli
 
 # Reload
 /reload-plugins
@@ -32,51 +32,51 @@ Use Kiro CLI from inside Claude Code for code reviews or to delegate tasks.
 Then run:
 
 ```
-/kiro:setup
+/kiro-cli:setup
 ```
 
 If kiro-cli is not installed, see https://kiro.dev to download and install Kiro CLI.
 
 ## Usage
 
-### `/kiro:review`
+### `/kiro-cli:review`
 
 Runs a Kiro CLI code review on your current work.
 
 ```
-/kiro:review
-/kiro:review --base main
-/kiro:review --background
+/kiro-cli:review
+/kiro-cli:review --base main
+/kiro-cli:review --background
 ```
 
-### `/kiro:rescue`
+### `/kiro-cli:rescue`
 
 Hands a task to Kiro CLI.
 
 ```
-/kiro:rescue investigate why the tests are failing
-/kiro:rescue --background fix the flaky integration test
+/kiro-cli:rescue investigate why the tests are failing
+/kiro-cli:rescue --background fix the flaky integration test
 ```
 
-### `/kiro:status`
+### `/kiro-cli:status`
 
 ```
-/kiro:status
-/kiro:status <job-id>
+/kiro-cli:status
+/kiro-cli:status <job-id>
 ```
 
-### `/kiro:result`
+### `/kiro-cli:result`
 
 ```
-/kiro:result
-/kiro:result <job-id>
+/kiro-cli:result
+/kiro-cli:result <job-id>
 ```
 
-### `/kiro:cancel`
+### `/kiro-cli:cancel`
 
 ```
-/kiro:cancel
-/kiro:cancel <job-id>
+/kiro-cli:cancel
+/kiro-cli:cancel <job-id>
 ```
 
 ## Development
@@ -84,11 +84,12 @@ Hands a task to Kiro CLI.
 ```bash
 pnpm install
 pnpm build
+pnpm test
 ```
 
-TypeScript source is in `src/`, compiled output goes to `plugins/kiro/scripts/lib/`.
+TypeScript source is in `src/`, compiled output goes to `plugins/kiro-cli/scripts/lib/`.
 
-**Note**: The compiled output in `plugins/kiro/scripts/lib/` is committed to the repository so that Claude Code can run the plugin without a build step on the user's machine. After modifying any TypeScript source, run `pnpm build` and commit the regenerated files.
+**Note**: The compiled output in `plugins/kiro-cli/scripts/lib/` is committed to the repository so that Claude Code can run the plugin without a build step on the user's machine. After modifying any TypeScript source, run `pnpm build` and commit the regenerated files.
 
 ## License
 

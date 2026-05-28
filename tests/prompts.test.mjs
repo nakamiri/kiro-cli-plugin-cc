@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { buildReviewPrompt, buildRescuePrompt, hasFlag } from "../plugins/kiro/scripts/lib/kiro-companion.js";
+import { buildReviewPrompt, buildRescuePrompt, hasFlag } from "../plugins/kiro-cli/scripts/lib/kiro-companion.js";
 
 test("buildReviewPrompt: defaults to HEAD when no --base", () => {
   const p = buildReviewPrompt([]);

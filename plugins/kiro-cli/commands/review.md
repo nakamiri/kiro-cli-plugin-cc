@@ -35,4 +35,4 @@ Bash({
   run_in_background: true
 })
 ```
-- Tell the user: "Kiro review started in the background. Check `/kiro:status` for progress."
+- Tell the user: "Kiro review started in the background. Check `/kiro-cli:status` for progress."

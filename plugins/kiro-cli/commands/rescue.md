@@ -4,7 +4,7 @@ argument-hint: '[--background|--wait] [task description]'
 allowed-tools: Bash(node:*), Bash(git:*), Agent
 ---
 
-Invoke the `kiro:kiro-rescue` subagent via the `Agent` tool (`subagent_type: "kiro:kiro-rescue"`), forwarding the raw user request as the prompt.
+Invoke the `kiro-cli:kiro-rescue` subagent via the `Agent` tool (`subagent_type: "kiro-cli:kiro-rescue"`), forwarding the raw user request as the prompt.
 
 Raw user request: $ARGUMENTS
 

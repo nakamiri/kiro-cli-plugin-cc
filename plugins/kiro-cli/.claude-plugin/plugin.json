@@ -1,5 +1,5 @@
 {
-  "name": "kiro",
+  "name": "kiro-cli",
   "version": "0.1.0",
   "description": "Use Kiro CLI from Claude Code to review code or delegate tasks.",
   "author": {

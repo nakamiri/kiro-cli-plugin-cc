@@ -16,7 +16,7 @@ beforeEach(() => {
 
 // Import after setting the env var so the module reads it lazily via getJobsDir().
 const { saveJob, loadJob, listJobs, cancel, status, result, getJobsDir } =
-  await import("../plugins/kiro/scripts/lib/kiro-companion.js");
+  await import("../plugins/kiro-cli/scripts/lib/kiro-companion.js");
 
 test("getJobsDir: respects KIRO_PLUGIN_JOBS_DIR env var", () => {
   assert.equal(getJobsDir(), tmpJobsDir);

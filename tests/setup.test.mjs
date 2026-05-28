@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const { setup, findKiro, dispatch } = await import("../plugins/kiro/scripts/lib/kiro-companion.js");
+const { setup, findKiro, dispatch } = await import("../plugins/kiro-cli/scripts/lib/kiro-companion.js");
 
 let tmpDir;
 let originalKiroPath;

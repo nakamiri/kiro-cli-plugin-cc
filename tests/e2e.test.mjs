@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const COMPANION = resolve(__dirname, "..", "plugins", "kiro", "scripts", "kiro-companion.mjs");
+const COMPANION = resolve(__dirname, "..", "plugins", "kiro-cli", "scripts", "kiro-companion.mjs");
 
 let tmpDir;
 

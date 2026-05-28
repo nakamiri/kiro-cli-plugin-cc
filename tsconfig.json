@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "outDir": "plugins/kiro/scripts/lib",
+    "outDir": "plugins/kiro-cli/scripts/lib",
     "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,

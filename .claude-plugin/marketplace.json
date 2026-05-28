@@ -1,5 +1,5 @@
 {
-  "name": "nakamiri-kiro",
+  "name": "kiro-cli",
   "owner": {
     "name": "nakamiri"
   },
@@ -9,13 +9,13 @@
   },
   "plugins": [
     {
-      "name": "kiro",
+      "name": "kiro-cli",
       "description": "Use Kiro CLI from Claude Code to review code or delegate tasks.",
       "version": "0.1.0",
       "author": {
         "name": "nakamiri"
       },
-      "source": "./plugins/kiro"
+      "source": "./plugins/kiro-cli"
     }
   ]
 }

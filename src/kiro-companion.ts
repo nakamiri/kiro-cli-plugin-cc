@@ -89,7 +89,7 @@ export function hasFlag(args: string[], flag: string): boolean {
 function runKiro(args: string[], background = false): string {
   const kiro = findKiro();
   if (!kiro) {
-    return "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro:setup` for help.";
+    return "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
   }
 
   if (background) {
@@ -185,7 +185,7 @@ export function result(args: string[]): string {
   }
   const job = loadJob(id);
   if (!job) return `No job found with ID: ${id}`;
-  if (job.status === "running") return `Job ${id} is still running. Use /kiro:status to check progress.`;
+  if (job.status === "running") return `Job ${id} is still running. Use /kiro-cli:status to check progress.`;
   return job.result ?? "No result stored.";
 }
 
