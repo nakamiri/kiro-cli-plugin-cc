@@ -61,7 +61,8 @@ function runKiro(args: string[], background = false): string {
     const job: Job = { id: genId(), kind: args[0] ?? "task", status: "running", startedAt: new Date().toISOString() };
     saveJob(job);
 
-    const child = spawn(kiro, ["chat", "--print", ...args], {
+    const prompt = args.join(" ");
+    const child = spawn(kiro, ["chat", "--no-interactive", "--trust-all-tools", prompt], {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
@@ -83,7 +84,8 @@ function runKiro(args: string[], background = false): string {
   }
 
   try {
-    const result = execSync(`${kiro} chat --print ${args.map(a => JSON.stringify(a)).join(" ")}`, {
+    const prompt = args.join(" ");
+    const result = execSync(`${kiro} chat --no-interactive --trust-all-tools ${JSON.stringify(prompt)}`, {
       encoding: "utf-8",
       timeout: 300_000,
       maxBuffer: 10 * 1024 * 1024,

@@ -82,11 +82,13 @@ Hands a task to Kiro CLI.
 ## Development
 
 ```bash
-npm install
-npm run build
+pnpm install
+pnpm build
 ```
 
 TypeScript source is in `src/`, compiled output goes to `plugins/kiro/scripts/lib/`.
+
+**Note**: The compiled output in `plugins/kiro/scripts/lib/` is committed to the repository so that Claude Code can run the plugin without a build step on the user's machine. After modifying any TypeScript source, run `pnpm build` and commit the regenerated files.
 
 ## License
 
