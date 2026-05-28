@@ -1,0 +1,21 @@
+{
+  "name": "nakamiri-kiro",
+  "owner": {
+    "name": "nakamiri"
+  },
+  "metadata": {
+    "description": "Kiro CLI plugin to use in Claude Code for delegation and code review.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "kiro",
+      "description": "Use Kiro CLI from Claude Code to review code or delegate tasks.",
+      "version": "0.1.0",
+      "author": {
+        "name": "nakamiri"
+      },
+      "source": "./plugins/kiro"
+    }
+  ]
+}
