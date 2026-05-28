@@ -23,7 +23,7 @@ Use Kiro CLI from inside Claude Code for code reviews or to delegate tasks.
 /plugin marketplace add nakamiri/kiro-cli-plugin-cc
 
 # Install the plugin
-/plugin install kiro-cli@kiro-cli-plugin
+/plugin install kiro-cli@kiro-cli-plugin-cc
 
 # Reload
 /reload-plugins
