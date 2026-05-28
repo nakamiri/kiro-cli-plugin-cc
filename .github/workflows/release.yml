@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Verify version consistency
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          MKT=$(node -p "require('./.claude-plugin/marketplace.json').metadata.version")
+          PLUGIN=$(node -p "require('./plugins/kiro-cli/.claude-plugin/plugin.json').version")
+          MKT_PLUGIN=$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].version")
+          echo "tag=$TAG pkg=$PKG mkt=$MKT plugin=$PLUGIN mkt_plugin=$MKT_PLUGIN"
+          for V in "$PKG" "$MKT" "$PLUGIN" "$MKT_PLUGIN"; do
+            if [ "$V" != "$TAG" ]; then
+              echo "::error::version mismatch (tag=$TAG, found=$V)"
+              exit 1
+            fi
+          done
+
+      - run: pnpm test
+
+      - run: pnpm build
+
+      - name: Verify compiled lib is up-to-date
+        run: |
+          if ! git diff --quiet -- plugins/kiro-cli/scripts/lib; then
+            echo "::error::compiled lib differs from committed output. Run 'pnpm build' and commit."
+            git diff -- plugins/kiro-cli/scripts/lib
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
