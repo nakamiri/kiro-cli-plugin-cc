@@ -1647,3 +1647,50 @@ test("a run that printed nothing gets the same wording from every path", async (
   assert.match(run(["result"]).stdout, /No output was recorded/);
   assert.match(run(["review"], { KIRO_CLI_PATH: kiro }).stdout, /No output was recorded/);
 });
+
+// --- Round-25 regressions ---
+
+test("a job records the budget it was started with", async () => {
+  const kiro = fakeEchoKiro();
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: "123456" }).stdout
+  );
+  const job = await waitForJob((j) => j.id === jobId);
+  // Without this, the staleness bound had to guess from the current settings,
+  // which is wrong whenever the two budgets differ or either is reconfigured.
+  assert.equal(job.timeoutMs, 123456);
+
+  const fg = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "234567" });
+  assert.match(fg.stdout, /ARG:chat/);
+  const foreground = readJobs().find((j) => j.timeoutMs === 234567);
+  assert.ok(foreground, `foreground budget not recorded: ${JSON.stringify(readJobs())}`);
+});
+
+test("a record with a bad timeoutMs is rejected", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(join(jobsDir, "kiro-badto-aa.json"), JSON.stringify({
+    id: "kiro-badto-aa", kind: "review", status: "completed",
+    startedAt: new Date().toISOString(), timeoutMs: "soon",
+  }));
+  assert.equal(run(["status"]).stdout.trim(), "No Kiro jobs found.");
+});
+
+test("the byte budget stops at the first record that overflows it", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // Documents the retention model deliberately: the newest run is kept
+  // unconditionally, then older ones only while the cumulative total fits. Once
+  // it is exceeded everything older goes, whether or not it would have fitted.
+  const rows = [["new", 1000, 900], ["mid", 3000, 5000], ["old", 6000, 5]];
+  for (const [n, age, bytes] of rows) {
+    const ts = new Date(Date.now() - age).toISOString();
+    writeFileSync(join(jobsDir, `kiro-cum${n}-aa.json`), JSON.stringify({
+      id: `kiro-cum${n}-aa`, kind: "review", status: "completed",
+      startedAt: ts, finishedAt: ts, resultBytes: bytes,
+    }));
+    writeFileSync(join(jobsDir, `kiro-cum${n}-aa.out`), "s".repeat(bytes));
+  }
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_MAX_JOBS: "50" });
+  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-cum") && f.endsWith(".json"));
+  assert.deepEqual(left, ["kiro-cumnew-aa.json"]);
+});

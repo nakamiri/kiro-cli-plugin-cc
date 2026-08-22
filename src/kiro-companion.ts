@@ -139,7 +139,7 @@ function runnerPath(): string {
  * it, and the only way a job survives the caller exiting.
  */
 function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: number): Job | string {
-  const job: Job = { id: genId(), kind, status: "running", startedAt: new Date().toISOString() };
+  const job: Job = { id: genId(), kind, status: "running", startedAt: new Date().toISOString(), timeoutMs };
   saveJob(job);
   // Once per job, which is the natural point to keep the store bounded.
   pruneJobs();

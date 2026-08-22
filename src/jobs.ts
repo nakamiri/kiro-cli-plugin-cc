@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { backgroundTimeoutMs, jobTtlMs, maxRetainedJobBytes, maxRetainedJobs } from "./kiro.js";
+import { backgroundTimeoutMs, foregroundTimeoutMs, jobTtlMs, maxRetainedJobBytes, maxRetainedJobs } from "./kiro.js";
 
 /**
  * A job's metadata. Deliberately small and free of Kiro's transcript: listing
@@ -33,6 +33,13 @@ export interface Job {
   note?: string;
   /** Byte length of `<id>.out`, when one was written. */
   resultBytes?: number;
+  /**
+   * The budget this run was started with. Recorded because it is the only way
+   * to tell a slow-but-healthy job from a stale record: the two execution modes
+   * have different budgets, either can be reconfigured between runs, and
+   * guessing from the current settings gets it wrong in both directions.
+   */
+  timeoutMs?: number;
 }
 
 export function getJobsDir(): string {
@@ -206,6 +213,9 @@ function readJobFile(path: string, expectedId: string): Job | null {
     if (typeof job.resultBytes !== "number" || !Number.isFinite(job.resultBytes) || job.resultBytes < 0) return null;
   }
   if (job.pid !== undefined && (typeof job.pid !== "number" || !Number.isInteger(job.pid))) return null;
+  if (job.timeoutMs !== undefined) {
+    if (typeof job.timeoutMs !== "number" || !Number.isFinite(job.timeoutMs) || job.timeoutMs < 1) return null;
+  }
   if (job.note !== undefined && typeof job.note !== "string") return null;
   return migrateInlineResult(job as Job & { result?: unknown });
 }
@@ -289,8 +299,22 @@ export function isOurRunner(pid: number, jobId: string): boolean {
   return classifyPid(pid, jobId) !== "foreign";
 }
 
-/** Grace over the largest timeout before an unverifiable runner is called stale. */
+/** Grace over a run's own budget before an unverifiable runner is called stale. */
 const STALE_SLACK_MS = 60_000;
+
+/**
+ * How long this job may run before an unverifiable pid is treated as stale. The
+ * run's recorded budget when there is one; otherwise the larger of the two
+ * configured budgets, since a record written before the field existed gives no
+ * clue which mode it was. Taking the background budget alone would call a
+ * still-running foreground job stale whenever the foreground budget was set
+ * higher -- and a stale record is uncancellable and eligible for pruning, so it
+ * would strand kiro-cli and then delete the record out from under it.
+ */
+function staleAfterMs(job: Job): number {
+  const budget = job.timeoutMs ?? Math.max(foregroundTimeoutMs(), backgroundTimeoutMs());
+  return budget + STALE_SLACK_MS;
+}
 
 /** How long a record may claim "running" without ever having recorded a pid. */
 const PIDLESS_GRACE_MS = 60_000;
@@ -330,7 +354,7 @@ export function reconcile(job: Job): Job {
       // unproven pid is not signalled. No run can outlive the largest timeout,
       // so past that it is stale whatever the pid now belongs to.
       const age = Date.now() - Date.parse(job.startedAt);
-      if (!Number.isFinite(age) || age <= backgroundTimeoutMs() + STALE_SLACK_MS) return job;
+      if (!Number.isFinite(age) || age <= staleAfterMs(job)) return job;
       return {
         ...job,
         status: "failed",
