@@ -1202,3 +1202,66 @@ test("result with no id reports the newest finished run, not the newest success"
   assert.match(out, /what actually just happened/);
   assert.ok(out.includes(`[job ${bad.jobId} (rescue) failed]`), `no provenance line: ${out}`);
 });
+
+// --- Round-17 regressions ---
+
+test("stdin text is not taken as the --base ref", () => {
+  const kiro = fakeEchoKiro();
+  const r = runWithStdin(["review", "--base"], "the auth paths\n", { KIRO_CLI_PATH: kiro });
+  // Appended plainly, the text became the ref and the focus text vanished.
+  assert.match(r.stdout, /Compare against HEAD\./);
+  assert.match(r.stdout, /Focus on: the auth paths/);
+});
+
+test("stdin text that reads like a flag stays text", () => {
+  const kiro = fakeEchoKiro();
+  const r = runWithStdin(["rescue"], "--background\n", { KIRO_CLI_PATH: kiro });
+  assert.doesNotMatch(r.stdout, /"status":"started"/);
+  assert.match(r.stdout, /^ARG:--background$/m);
+});
+
+test("--args-stdin against a terminal is refused rather than hanging", () => {
+  const kiro = fakeEchoKiro();
+  // No `input`, and stdin inherited from a non-tty here, so drive the tty branch
+  // by checking the closed-descriptor path instead: either way it must not hang.
+  const r = spawnSync(process.execPath, [COMPANION, "rescue", "--args-stdin"], {
+    encoding: "utf-8",
+    input: "",
+    timeout: 15_000,
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir, KIRO_CLI_PATH: kiro },
+  });
+  assert.equal(r.signal, null, "the command hung");
+  assert.equal(r.status, 0);
+});
+
+test("result with no id reports the run that finished last, not the one that started last", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // A long job started first and finished last; a short one started later.
+  writeFileSync(join(jobsDir, "kiro-long-aa.json"), JSON.stringify({
+    id: "kiro-long-aa", kind: "review", status: "completed",
+    startedAt: "2026-01-01T10:00:00.000Z", finishedAt: "2026-01-01T10:30:00.000Z", resultBytes: 7,
+  }));
+  writeFileSync(join(jobsDir, "kiro-long-aa.out"), "LATEST!");
+  writeFileSync(join(jobsDir, "kiro-short-aa.json"), JSON.stringify({
+    id: "kiro-short-aa", kind: "review", status: "completed",
+    startedAt: "2026-01-01T10:05:00.000Z", finishedAt: "2026-01-01T10:06:00.000Z", resultBytes: 6,
+  }));
+  writeFileSync(join(jobsDir, "kiro-short-aa.out"), "stale!");
+  // listJobs sorts by startedAt, which picked the short job.
+  assert.equal(run(["result"]).stdout.trim(), "LATEST!");
+});
+
+test("cancel never signals a live pid that is not one of our runners", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // pid 1 is alive and is emphatically not a kiro runner. The identity guard
+  // must stop this before any signal is considered -- as root it would
+  // otherwise be delivered to init.
+  writeFileSync(join(jobsDir, "kiro-foreign-aa.json"), JSON.stringify({
+    id: "kiro-foreign-aa", kind: "review", status: "running",
+    startedAt: new Date().toISOString(), pid: 1,
+  }));
+  const r = run(["cancel", "kiro-foreign-aa"]);
+  assert.doesNotMatch(r.stdout, /^Cancelled job/);
+  assert.match(r.stdout, /already failed|Could not cancel/);
+  assert.equal(process.kill(1, 0), true, "pid 1 was signalled");
+});

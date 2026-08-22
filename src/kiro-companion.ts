@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type Job, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob } from "./jobs.js";
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
@@ -14,7 +14,20 @@ function genId(): string {
   return `kiro-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-export function buildReviewPrompt(args: string[]): string {
+/**
+ * Everything after a bare `--` is literal text, never a flag or a flag's value.
+ * Free-form text arrives that way (see readArgsFromStdin), so a task that
+ * happens to read like an option -- or a `--base` with no ref of its own -- can
+ * neither be parsed as one nor swallow the text as its argument.
+ */
+export function splitArgs(args: string[]): { flags: string[]; literal: string } {
+  const sep = args.indexOf("--");
+  if (sep === -1) return { flags: args, literal: "" };
+  return { flags: args.slice(0, sep), literal: args.slice(sep + 1).join(" ") };
+}
+
+export function buildReviewPrompt(rawArgs: string[]): string {
+  const { flags: args, literal } = splitArgs(rawArgs);
   let base = "HEAD";
   const filtered: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -33,21 +46,23 @@ export function buildReviewPrompt(args: string[]): string {
     }
     filtered.push(a);
   }
-  const extra = filtered.join(" ").trim();
+  const extra = [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
   let prompt = `Review the code changes. Compare against ${base}.`;
   if (extra) prompt += ` Focus on: ${extra}`;
   prompt += " Provide a thorough code review covering correctness, security, performance, and style.";
   return prompt;
 }
 
-export function buildRescuePrompt(args: string[]): string {
-  const filtered = args.filter((a) => !["--background", "--wait"].includes(a));
-  const task = filtered.join(" ").trim();
+export function buildRescuePrompt(rawArgs: string[]): string {
+  const { flags, literal } = splitArgs(rawArgs);
+  const filtered = flags.filter((a) => !["--background", "--wait"].includes(a));
+  const task = [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
   return task || "Investigate and fix the current issue.";
 }
 
 export function hasFlag(args: string[], flag: string): boolean {
-  return args.includes(flag);
+  // Only before the `--`: literal text that happens to read like a flag is not one.
+  return splitArgs(args).flags.includes(flag);
 }
 
 /**
@@ -277,7 +292,11 @@ export function result(args: string[]): string {
     // Any finished run, not just a successful one. Filtering to "completed"
     // meant that after a failed run this quietly handed back an *older* run's
     // transcript, and the failed one was unreachable without its id.
-    const jobs = listJobs().filter((j) => j.status !== "running");
+    // listJobs orders by startedAt; what matters here is which run finished
+    // last, or two overlapping background jobs hand back the stale transcript.
+    const jobs = listJobs()
+      .filter((j) => j.status !== "running")
+      .sort((a, b) => Date.parse(b.finishedAt ?? b.startedAt) - Date.parse(a.finishedAt ?? a.startedAt));
     if (jobs.length === 0) return "No finished jobs found.";
     const latest = jobs[0]!;
     // `||`, not `??`: a run that printed nothing stores an empty transcript,
@@ -316,6 +335,7 @@ export function cancel(args: string[]): string {
     return `Could not cancel job ${job.id}: it is still starting and has no runner recorded yet. Try again in a moment.`;
   }
   let signalled = false;
+  let signalError = "";
   if (isPidAlive(job.pid)) {
     // reconcile() rejects a pid that demonstrably belongs to something else, so
     // a recycled pid never reaches here -- but it treats an unreadable command
@@ -337,7 +357,14 @@ export function cancel(args: string[]): string {
         process.kill(-job.pid, "SIGTERM");
         signalled = true;
       } catch {
-        try { process.kill(job.pid, "SIGTERM"); signalled = true; } catch { /* already dead */ }
+        try {
+          process.kill(job.pid, "SIGTERM");
+          signalled = true;
+        } catch (e) {
+          // EPERM, for instance: a runner belonging to another user, which
+          // isPidAlive reports as alive. Not something to paper over.
+          signalError = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+        }
       }
     }
   }
@@ -348,10 +375,22 @@ export function cancel(args: string[]): string {
     if (settled && settled.status !== "running") {
       return `Cancelled job ${job.id} (recorded as ${settled.status})`;
     }
+  } else if (isPidAlive(job.pid)) {
+    // We meant to signal it and could not. Recording a cancellation anyway
+    // would leave Kiro working under --trust-all-tools while the user believed
+    // it had stopped, and its result would then be discarded.
+    return (
+      `Could not cancel job ${job.id}: signalling its runner (pid ${job.pid}) was refused` +
+      `${signalError ? ` (${signalError})` : ""}; it is still running.`
+    );
   }
-  // Nothing to signal, or the runner died without recording: record it here,
-  // preserving whatever the stored record already holds.
-  const base = loadJobRaw(job.id) ?? job;
+  // Signalled but not yet recorded, or the runner is already gone: record it
+  // here, preserving whatever the stored record holds.
+  const base = loadJobRaw(job.id);
+  if (base === null) {
+    // Removed during the settle window. Re-creating it would invent a job.
+    return `Job ${job.id} no longer exists; nothing was recorded.`;
+  }
   if (base.status !== "running") {
     return `Job ${job.id} is already ${base.status}; nothing to cancel.`;
   }
@@ -385,6 +424,33 @@ export async function dispatch(command: string | undefined, args: string[]): Pro
 }
 
 const ARGS_STDIN_FLAG = "--args-stdin";
+const STDIN_EAGAIN_BUDGET_MS = 5_000;
+
+/** Reads fd 0 to EOF, tolerating a non-blocking pipe. */
+function readAllStdin(): string {
+  const chunks: Buffer[] = [];
+  const buf = Buffer.alloc(64 * 1024);
+  const deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
+  for (;;) {
+    let n: number;
+    try {
+      n = readSync(0, buf, 0, buf.length, null);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      // A pipe that is momentarily empty and non-blocking. Not an error yet.
+      if (code === "EAGAIN") {
+        if (Date.now() >= deadline) throw new Error("timed out waiting for input on stdin");
+        sleepSync(10);
+        continue;
+      }
+      if (code === "EOF") break;
+      throw e;
+    }
+    if (n === 0) break;
+    chunks.push(Buffer.from(buf.subarray(0, n)));
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
 
 /**
  * Slash commands can only interpolate their arguments into a shell command
@@ -393,19 +459,28 @@ const ARGS_STDIN_FLAG = "--args-stdin";
  * it, and the rest is word-split and expanded with no permission prompt because
  * the Bash rule is pre-approved. With this flag the text arrives on stdin
  * instead, where nothing can reinterpret it, and only flags stay in argv.
+ *
+ * It is appended after a `--` so that it cannot be read as a flag or taken as
+ * one's value. A read that fails is reported, never silently dropped: `rescue`
+ * would otherwise fall back to its generic "investigate the current issue"
+ * task and hand that to Kiro with full tool trust.
+ *
+ * Returns the arguments to dispatch, or an error string to print instead.
  */
-function readArgsFromStdin(args: string[]): string[] {
+function readArgsFromStdin(args: string[]): string[] | string {
   if (!args.includes(ARGS_STDIN_FLAG)) return args;
   const rest = args.filter((a) => a !== ARGS_STDIN_FLAG);
-  let text = "";
+  if (process.stdin.isTTY) {
+    return `ERROR: ${ARGS_STDIN_FLAG} was given but stdin is a terminal; pass the text in on stdin.`;
+  }
+  let text: string;
   try {
-    text = readFileSync(0, "utf-8");
-  } catch {
-    // No stdin attached (a terminal, or a closed descriptor): nothing to add.
-    return rest;
+    text = readAllStdin();
+  } catch (e) {
+    return `ERROR: could not read arguments from stdin: ${(e as Error).message}`;
   }
   const trimmed = text.replace(/\n+$/, "");
-  return trimmed === "" ? rest : [...rest, trimmed];
+  return trimmed === "" ? rest : [...rest, "--", trimmed];
 }
 
 function isMainOrShim(): boolean {
@@ -423,5 +498,6 @@ function isMainOrShim(): boolean {
 
 if (isMainOrShim()) {
   const [command, ...commandArgs] = process.argv.slice(2);
-  console.log(await dispatch(command, readArgsFromStdin(commandArgs)));
+  const parsed = readArgsFromStdin(commandArgs);
+  console.log(typeof parsed === "string" ? parsed : await dispatch(command, parsed));
 }
