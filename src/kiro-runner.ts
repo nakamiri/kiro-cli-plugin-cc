@@ -75,6 +75,9 @@ function append(text: string, byteLength: number): void {
   chunks.push(text);
 }
 
+/** Set once the child exists, for sweepGroup's fallback below. */
+let spawned: ReturnType<typeof spawn> | undefined;
+
 /**
  * Terminates anything still left in our process group, this process included.
  * Always run once the record is on disk: kiro-cli's descendants share this
@@ -82,11 +85,18 @@ function append(text: string, byteLength: number): void {
  * it would outlive the supervisor unbounded under --trust-all-tools.
  */
 function sweepGroup(): void {
+  let swept = false;
   try {
     process.kill(-process.pid, "SIGKILL");
+    swept = true;
   } catch {
-    /* not a group leader, or nothing left */
+    /* not a group leader, or nothing left in the group */
   }
+  if (swept) return;
+  // Without this, a group kill that does not land leaves kiro-cli running under
+  // --trust-all-tools with no supervisor, no timeout and nothing left to cancel,
+  // while the record already reads cancelled or failed.
+  try { spawned?.kill("SIGKILL"); } catch { /* already gone */ }
 }
 
 function finalize(status: Job["status"], result: string): void {
@@ -143,6 +153,7 @@ function finalize(status: Job["status"], result: string): void {
 }
 
 const child = spawn(kiroPath, kiroArgs, { stdio: ["ignore", "pipe", "pipe"] });
+spawned = child;
 
 const timer = setTimeout(() => {
   timedOut = true;

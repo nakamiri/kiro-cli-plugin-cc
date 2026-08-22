@@ -35,10 +35,17 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main'
 in on stdin, and `--args-stdin` tells the script to pick it up there:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main' --args-stdin <<'KIRO_ARGS_a41f7c2e'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main' --args-stdin <<'KIRO_ARGS_<pick-your-own>'
 the auth paths
-KIRO_ARGS_a41f7c2e
+KIRO_ARGS_<pick-your-own>
 ```
+
+Pick the heredoc delimiter yourself, per call, and check it: it must not appear
+on a line of its own anywhere in the text you are passing. A fixed, published
+delimiter is not a defence -- text containing that exact line closes the heredoc
+early and everything after it runs as shell commands in this same pre-approved
+call. Use something like `KIRO_ARGS_` plus a few random characters, and if the
+text does contain it, lengthen the delimiter until it does not.
 
 Use the stdin form whenever there is any free-form text at all. It is not about
 convenience: `allowed-tools` pre-approves `Bash(node:*)` for this command, so

@@ -19,10 +19,17 @@ Forwarding rules:
   and a heredoc with a quoted delimiter:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue '--background' --args-stdin <<'KIRO_ARGS_a41f7c2e'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue '--background' --args-stdin <<'KIRO_ARGS_<pick-your-own>'
 the task description, verbatim
-KIRO_ARGS_a41f7c2e
+KIRO_ARGS_<pick-your-own>
 ```
+
+  Pick the heredoc delimiter yourself, per call, and check it: it must not appear
+  on a line of its own anywhere in the text you are passing. A fixed, published
+  delimiter is not a defence -- text containing that exact line closes the heredoc
+  early and everything after it runs as shell commands in this same pre-approved
+  call. Use something like `KIRO_ARGS_` plus a few random characters, and if the
+  text does contain it, lengthen the delimiter until it does not.
 
   The heredoc body is not interpreted by the shell, so an apostrophe, a `$` or a
   newline in the user's request cannot break out of it. Quoting the text into the

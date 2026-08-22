@@ -9,12 +9,8 @@ const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/ki
 function genId() {
     return `kiro-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
-/**
- * Everything after a bare `--` is literal text, never a flag or a flag's value.
- * Free-form text arrives that way (see readArgsFromStdin), so a task that
- * happens to read like an option -- or a `--base` with no ref of its own -- can
- * neither be parsed as one nor swallow the text as its argument.
- */
+export class InvalidArgument extends Error {
+}
 /**
  * Refs that are safe to put on a shell command line: no quotes, no `$`, no
  * backticks, no whitespace, no separators. Wide enough for real revisions
@@ -31,13 +27,17 @@ function requireSafeRef(ref) {
         return ref;
     throw new InvalidArgument(`${ref} is not a usable git ref. Use letters, digits and . _ / @ ^ ~ { } - only.`);
 }
+/**
+ * Everything after a bare `--` is literal text, never a flag or a flag's value.
+ * Free-form text arrives that way (see readArgsFromStdin), so a task that
+ * happens to read like an option -- or a `--base` with no ref of its own -- can
+ * neither be parsed as one nor swallow the text as its argument.
+ */
 export function splitArgs(args) {
     const sep = args.indexOf("--");
     if (sep === -1)
         return { flags: args, literal: "" };
     return { flags: args.slice(0, sep), literal: args.slice(sep + 1).join(" ") };
-}
-export class InvalidArgument extends Error {
 }
 export function buildReviewPrompt(rawArgs) {
     const { flags: args, literal } = splitArgs(rawArgs);
@@ -335,7 +335,7 @@ export function result(args) {
         const latest = jobs[0];
         // `||`, not `??`: a run that printed nothing stores an empty transcript,
         // and returning it verbatim made /kiro-cli:result print a blank line.
-        const body = readJobResult(latest.id) || latest.note || "No result stored.";
+        const body = readJobResult(latest.id) || latest.note || "No output was recorded.";
         if (latest.status === "completed")
             return body;
         return `[job ${latest.id} (${latest.kind}) ${latest.status}]\n\n${body}`;
@@ -345,7 +345,7 @@ export function result(args) {
         return `No job found with ID: ${id}`;
     if (job.status === "running")
         return `Job ${id} is still running. Use /kiro-cli:status to check progress.`;
-    const body = readJobResult(id) || job.note || "No result stored.";
+    const body = readJobResult(id) || job.note || "No output was recorded.";
     // Same provenance line as the no-id path: presented bare, a partial
     // transcript from an aborted run reads as a finished review.
     if (job.status === "completed")

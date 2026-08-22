@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { jobTtlMs, maxRetainedJobBytes, maxRetainedJobs } from "./kiro.js";
+import { backgroundTimeoutMs, jobTtlMs, maxRetainedJobBytes, maxRetainedJobs } from "./kiro.js";
 
 /**
  * A job's metadata. Deliberately small and free of Kiro's transcript: listing
@@ -289,6 +289,9 @@ export function isOurRunner(pid: number, jobId: string): boolean {
   return classifyPid(pid, jobId) !== "foreign";
 }
 
+/** Grace over the largest timeout before an unverifiable runner is called stale. */
+const STALE_SLACK_MS = 60_000;
+
 /** How long a record may claim "running" without ever having recorded a pid. */
 const PIDLESS_GRACE_MS = 60_000;
 
@@ -316,7 +319,25 @@ export function reconcile(job: Job): Job {
       note: job.note ?? "ERROR: the job was never started (its launcher exited before recording a runner).",
     };
   }
-  if (isPidAlive(job.pid) && isOurRunner(job.pid, job.id)) return job;
+  if (isPidAlive(job.pid)) {
+    const verdict = classifyPid(job.pid, job.id);
+    if (verdict === "ours") return job;
+    if (verdict === "unknown") {
+      // Nothing here can be read (no /proc, no ps), so we cannot tell our runner
+      // from a process that inherited its pid. Trusting it indefinitely made a
+      // dead job "running" for ever: exempt from every retention budget because
+      // pruning treats running jobs as live, and refused by cancel because an
+      // unproven pid is not signalled. No run can outlive the largest timeout,
+      // so past that it is stale whatever the pid now belongs to.
+      const age = Date.now() - Date.parse(job.startedAt);
+      if (!Number.isFinite(age) || age <= backgroundTimeoutMs() + STALE_SLACK_MS) return job;
+      return {
+        ...job,
+        status: "failed",
+        note: job.note ?? "ERROR: the Kiro runner could not be verified on this platform and has outlived its timeout.",
+      };
+    }
+  }
   // As above: no invented finishedAt.
   return {
     ...job,

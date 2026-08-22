@@ -41,10 +41,13 @@ The slash commands pass flags as ordinary arguments and any free-form text on
 stdin, via `--args-stdin`:
 
 ```bash
-node .../kiro-companion.mjs review '--base' 'main' --args-stdin <<'EOF'
+node .../kiro-companion.mjs review '--base' 'main' --args-stdin <<'KIRO_ARGS_xyz'
 the auth paths
-EOF
+KIRO_ARGS_xyz
 ```
+
+The delimiter is chosen per call and checked against the text, so a request that
+happens to contain it cannot close the heredoc early.
 
 A slash command can only interpolate its arguments into a shell command line,
 and getting arbitrary text through that intact depends entirely on quoting it

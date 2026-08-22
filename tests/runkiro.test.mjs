@@ -1630,3 +1630,20 @@ test("a question in the focus text keeps its own punctuation", () => {
   assert.match(r.stdout, /Focus on: why is auth slow\? Provide/);
   assert.doesNotMatch(r.stdout, /slow\?\./);
 });
+
+// --- Round-24 regressions ---
+
+// The "unknown" pid verdict -- no readable /proc and no ps -- cannot be reached
+// on Linux, so the staleness bound that now applies to it has no test here. The
+// "foreign" verdict it sits beside is covered above ("a running record whose pid
+// now belongs to another process reads as failed").
+
+test("a run that printed nothing gets the same wording from every path", async () => {
+  const kiro = join(tmpDir, "silent2-kiro");
+  writeFileSync(kiro, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  assert.match(run(["result", jobId]).stdout, /No output was recorded/);
+  assert.match(run(["result"]).stdout, /No output was recorded/);
+  assert.match(run(["review"], { KIRO_CLI_PATH: kiro }).stdout, /No output was recorded/);
+});
