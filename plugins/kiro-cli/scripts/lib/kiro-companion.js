@@ -16,8 +16,13 @@ export function buildReviewPrompt(args) {
         if (a === "--background" || a === "--wait")
             continue;
         if (a === "--base") {
-            base = args[i + 1] ?? "HEAD";
-            i++;
+            const next = args[i + 1];
+            // A flag is never a git ref: "--base --background" used to make
+            // "--background" the ref while still detaching the job.
+            if (next !== undefined && !next.startsWith("-")) {
+                base = next;
+                i++;
+            }
             continue;
         }
         filtered.push(a);
@@ -101,7 +106,24 @@ function startBackgroundJob(kind, kiro, prompt) {
     }
     // The runner is its own process group leader, so cancel can signal the group.
     job.pid = child.pid;
-    saveJob(job);
+    try {
+        saveJob(job);
+    }
+    catch (e) {
+        // Without the pid on record the job is untrackable: cancel would report
+        // success without signalling anything while Kiro edited the repository.
+        // Stop it now rather than leave it running unattended.
+        try {
+            process.kill(-child.pid, "SIGKILL");
+        }
+        catch {
+            try {
+                process.kill(child.pid, "SIGKILL");
+            }
+            catch { /* already gone */ }
+        }
+        return `ERROR: started the Kiro runner but could not record it, so it was stopped: ${e.message}`;
+    }
     return JSON.stringify({ jobId: job.id, status: "started" });
 }
 function runForeground(kiro, prompt) {
@@ -111,6 +133,9 @@ function runForeground(kiro, prompt) {
         return execFileSync(kiro, chatArgs(prompt), {
             encoding: "utf-8",
             timeout: foregroundTimeoutMs(),
+            // Without this the timeout is advisory: execFileSync sends SIGTERM and
+            // then goes on waiting, so a child that ignores it blocks indefinitely.
+            killSignal: "SIGKILL",
             maxBuffer: maxOutputBytes(),
         });
     }

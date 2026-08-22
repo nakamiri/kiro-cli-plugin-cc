@@ -1,6 +1,7 @@
 ---
 description: Delegate a task to Kiro CLI for investigation or fixing
 argument-hint: '[--background|--wait] [task description]'
+disable-model-invocation: true
 allowed-tools: Bash(node:*), Bash(git:*), Agent
 ---
 

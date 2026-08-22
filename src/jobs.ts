@@ -107,6 +107,9 @@ function readJobFile(path: string, expectedId: string): Job | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const job = parsed as Partial<Job>;
   if (typeof job.id !== "string" || typeof job.kind !== "string" || typeof job.startedAt !== "string") return null;
+  // startedAt drives both sorting and the launch-window check, so a value that
+  // does not parse makes the record unusable rather than merely odd.
+  if (!Number.isFinite(Date.parse(job.startedAt))) return null;
   if (job.id !== expectedId) return null;
   if (job.status !== "running" && job.status !== "completed" && job.status !== "failed" && job.status !== "cancelled") {
     return null;
@@ -177,7 +180,8 @@ export function reconcile(job: Job): Job {
     // is nothing to check liveness against in that window. A record that never
     // gained a pid means the launcher died in it.
     const age = Date.now() - Date.parse(job.startedAt);
-    if (!Number.isFinite(age) || age <= PIDLESS_GRACE_MS) return job;
+    // Fail closed: an unusable timestamp must not keep a job "running" forever.
+    if (Number.isFinite(age) && age <= PIDLESS_GRACE_MS) return job;
     return {
       ...job,
       status: "failed",

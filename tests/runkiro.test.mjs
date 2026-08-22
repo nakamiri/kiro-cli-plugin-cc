@@ -572,3 +572,74 @@ test("a legitimate record is still readable by id", async () => {
   await waitForJob((j) => j.id === jobId && j.status !== "running");
   assert.equal(JSON.parse(run(["status", jobId]).stdout).id, jobId);
 });
+
+// --- Round-7 regressions ---
+
+test("the foreground timeout is a hard upper bound", () => {
+  const kiro = join(tmpDir, "stubborn-fg-kiro");
+  writeFileSync(kiro, "#!/bin/sh\ntrap '' TERM\nsleep 10\necho done\n", { mode: 0o755 });
+  const started = Date.now();
+  const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "1500" });
+  const elapsed = Date.now() - started;
+  // A plain `timeout` only sends SIGTERM and then keeps waiting.
+  assert.ok(elapsed < 6000, `waited ${elapsed}ms on a 1500ms budget`);
+  assert.match(r.stdout, /ERROR/);
+});
+
+test("--base does not consume a following flag as its ref", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base", "--wait", "fix auth"], { KIRO_CLI_PATH: kiro });
+  // "--wait" used to become the git ref.
+  assert.match(r.stdout, /Compare against HEAD\./);
+  assert.doesNotMatch(r.stdout, /Compare against --/);
+  // And it is still honoured as a flag, so it does not leak into the prompt.
+  assert.doesNotMatch(r.stdout, /Focus on:.*--wait/);
+  assert.match(r.stdout, /Focus on: fix auth/);
+});
+
+test("--base followed by --background still detaches, with HEAD as the ref", async () => {
+  const kiro = fakeEchoKiro();
+  const { jobId } = JSON.parse(run(["review", "--base", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running");
+  assert.equal(job.status, "completed");
+  assert.match(job.result, /Compare against HEAD\./);
+  assert.doesNotMatch(job.result, /Compare against --/);
+});
+
+test("--base at the end of the arguments falls back to HEAD", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against HEAD\./);
+});
+
+test("--base still takes an ordinary ref", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base", "release/1.x"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against release\/1\.x\./);
+});
+
+test("a record with an unparseable startedAt is rejected outright", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(
+    join(jobsDir, "weird.json"),
+    JSON.stringify({ id: "weird", kind: "review", status: "running", startedAt: "not-a-date" })
+  );
+  // It used to reconcile to "running" forever and keep being picked by cancel.
+  assert.equal(run(["status"]).stdout.trim(), "No Kiro jobs found.");
+  assert.match(run(["status", "weird"]).stdout, /No job found with ID: weird/);
+  assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
+});
+
+test("an unwritable job store reports an error and starts nothing", async () => {
+  if (process.getuid === undefined || process.getuid() === 0) return; // root ignores the mode
+  const marker = join(tmpDir, "should-not-run");
+  const kiro = fakeSlowKiro(1, marker);
+  mkdirSync(jobsDir, { recursive: true, mode: 0o500 });
+  const r = run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.match(r.stdout, /^ERROR: /);
+  assert.doesNotMatch(r.stdout, /"status":"started"/);
+  // A job that could not be recorded must not be running behind our back.
+  await new Promise((res) => setTimeout(res, 2500));
+  assert.equal(existsSync(marker), false, "kiro-cli ran for an unrecordable job");
+});

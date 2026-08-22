@@ -92,6 +92,9 @@ function finalize(status: Job["status"], result: string, sweep = false): void {
     saveJob(job);
   } catch (e) {
     console.error(`kiro-runner: could not record job ${jobId}: ${(e as Error).message}`);
+    // Still tear the group down when asked: failing to write the record is no
+    // reason to leave a cancelled kiro-cli running unsupervised.
+    if (sweep) sweepGroup();
     process.exit(1);
   }
   // The record is on disk before anything else in the group is torn down.
@@ -148,7 +151,11 @@ child.on("error", (err) => {
   clearTimeout(timer);
   if (graceTimer) clearTimeout(graceTimer);
   settled = true;
-  finalize("failed", `ERROR: could not run kiro-cli: ${err.message}`);
+  // An error can also arrive after a successful spawn (for instance EPERM from
+  // the timeout kill), so keep whatever kiro produced and sweep the group.
+  const output = chunks.join("");
+  const detail = `ERROR: could not run kiro-cli: ${err.message}`;
+  finalize("failed", output ? `${output}\n\n${detail}` : detail, true);
 });
 
 // `cancel` signals this whole group; handling the signal lets us record the
