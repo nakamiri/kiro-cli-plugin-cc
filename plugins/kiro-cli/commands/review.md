@@ -12,16 +12,20 @@ Core constraint:
 - Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Your only job is to run the review and return Kiro's output verbatim to the user.
 
-Run exactly one command. The quoted heredoc delimiter matters: it stops the
-shell from expanding anything in the user's arguments, so a review request
-containing `$(...)`, backticks or quotes is passed through as plain text.
+Run exactly one command:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review "$(cat <<'KIRO_ARGS'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review "$(cat <<'KIRO_ARGS_a41f7c2e'
 $ARGUMENTS
-KIRO_ARGS
+KIRO_ARGS_a41f7c2e
 )"
 ```
+
+The quoted heredoc delimiter is what makes this safe: the shell performs no
+expansion at all inside the body, so arguments containing `$(...)`, backticks,
+quotes or apostrophes are passed through as plain text. Do not replace it with
+an inline `'$ARGUMENTS'` -- a single quote in the arguments would end the
+quoting and the rest would run as shell commands.
 
 The script decides the execution mode from those arguments itself:
 - `--background` starts a detached job and prints `{"jobId": "...", "status": "started"}`

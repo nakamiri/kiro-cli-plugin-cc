@@ -1,10 +1,10 @@
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { type Job, isPidAlive, listJobs, loadJob, pidCommandLine, saveJob } from "./jobs.js";
+import { type Job, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
 import { chatArgs, findKiro, foregroundTimeoutMs, maxOutputBytes, trustAllTools } from "./kiro.js";
 
 export type { Job };
-export { getJobsDir, isPidAlive, listJobs, loadJob, pidCommandLine, saveJob } from "./jobs.js";
+export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
 export { findKiro, trustAllTools } from "./kiro.js";
 
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
@@ -41,6 +41,28 @@ export function buildRescuePrompt(args: string[]): string {
 
 export function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
+}
+
+/**
+ * A signalled runner records its own outcome, including the output it had
+ * captured. Give it a moment to do so rather than overwriting it from here.
+ */
+const CANCEL_SETTLE_MS = 2_000;
+const CANCEL_POLL_MS = 50;
+
+/** The command surface is synchronous, so the wait has to be too. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function awaitRunnerRecord(id: string): Job | null {
+  const deadline = Date.now() + CANCEL_SETTLE_MS;
+  for (;;) {
+    const fresh = loadJobRaw(id);
+    if (!fresh || fresh.status !== "running") return fresh;
+    if (Date.now() >= deadline) return fresh;
+    sleepSync(CANCEL_POLL_MS);
+  }
 }
 
 function runnerPath(): string {
@@ -181,12 +203,14 @@ export function cancel(args: string[]): string {
     job = loadJob(id);
     if (!job) return `No job found with ID: ${id}`;
   }
-  // loadJob/listJobs reconcile dead runners to "failed", so a job that still
-  // reads "running" here has a live pid -- we never signal a recycled one.
+  // loadJob/listJobs reconcile a dead or never-started runner to "failed", so a
+  // job that still reads "running" here has a live pid or is inside the launch
+  // window -- either way we are not about to signal a stale one.
   if (job.status !== "running") {
     return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
   }
   let note = "";
+  let signalled = false;
   if (job.pid !== undefined && isPidAlive(job.pid)) {
     const cmd = pidCommandLine(job.pid);
     if (cmd !== null && !(cmd.includes("kiro-runner") && cmd.includes(job.id))) {
@@ -195,17 +219,32 @@ export function cancel(args: string[]): string {
       note = `\n  Note: pid ${job.pid} now belongs to another process; no signal was sent.`;
     } else if (cmd === null) {
       // Identity could not be confirmed, so use the narrowest possible signal.
-      try { process.kill(job.pid, "SIGTERM"); } catch { /* already dead */ }
+      try { process.kill(job.pid, "SIGTERM"); signalled = true; } catch { /* already dead */ }
     } else {
       try {
         // Negated pid: the runner leads the group, so kiro-cli stops with it.
         process.kill(-job.pid, "SIGTERM");
+        signalled = true;
       } catch {
-        try { process.kill(job.pid, "SIGTERM"); } catch { /* already dead */ }
+        try { process.kill(job.pid, "SIGTERM"); signalled = true; } catch { /* already dead */ }
       }
     }
   }
-  saveJob({ ...job, status: "cancelled", finishedAt: new Date().toISOString() });
+
+  if (signalled) {
+    const settled = awaitRunnerRecord(job.id);
+    // The runner got there first and kept the partial output; leave it alone.
+    if (settled && settled.status !== "running") {
+      return `Cancelled job ${job.id} (recorded as ${settled.status})${note}`;
+    }
+  }
+  // Nothing to signal, or the runner died without recording: record it here,
+  // preserving whatever the stored record already holds.
+  const base = loadJobRaw(job.id) ?? job;
+  if (base.status !== "running") {
+    return `Job ${job.id} is already ${base.status}; nothing to cancel.`;
+  }
+  saveJob({ ...base, status: "cancelled", finishedAt: new Date().toISOString() });
   return `Cancelled job ${job.id}${note}`;
 }
 

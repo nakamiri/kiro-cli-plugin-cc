@@ -366,3 +366,56 @@ test("an empty quoted argument is treated as no arguments", () => {
   const r = run(["status", ""]);
   assert.match(r.stdout, /No Kiro jobs found/);
 });
+
+// --- Round-3 regressions ---
+
+test("cancel keeps the output the runner had already captured", async () => {
+  const kiro = join(tmpDir, "chatty-kiro");
+  writeFileSync(kiro, '#!/bin/sh\necho "partial findings so far"\nsleep 30\n', { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  // Let kiro emit its first line before pulling the plug.
+  await new Promise((r) => setTimeout(r, 600));
+  assert.match(run(["cancel", jobId]).stdout, /Cancelled job/);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
+  assert.equal(job.status, "cancelled");
+  // Previously the launcher overwrote the runner's record with a stale snapshot.
+  assert.match(run(["result", jobId]).stdout, /partial findings so far/);
+});
+
+test("truncation honours a byte budget, not a character count", async () => {
+  const kiro = join(tmpDir, "cjk-loud-kiro");
+  writeFileSync(kiro, `#!${process.execPath}\nprocess.stdout.write("日".repeat(20_000));\n`, { mode: 0o755 });
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_OUTPUT_BYTES: "1000" }).stdout
+  );
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  const kept = job.result.replace(/\n*\[output truncated.*$/s, "");
+  // Each character is 3 bytes, so a character-based slice kept 3000 bytes.
+  assert.ok(Buffer.byteLength(kept) <= 1000, `kept ${Buffer.byteLength(kept)} bytes`);
+  assert.ok(Buffer.byteLength(kept) > 900, `kept only ${Buffer.byteLength(kept)} bytes`);
+  assert.equal(kept.includes("�"), false, "sliced mid-character");
+});
+
+test("tool trust fails closed for an unrecognised opt-out value", () => {
+  const kiro = fakeEchoKiro();
+  for (const v of ["off", "FALSE", "disabled", "0", "no"]) {
+    const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TRUST_ALL_TOOLS: v });
+    assert.doesNotMatch(r.stdout, /^ARG:--trust-all-tools$/m, `trust survived ${v}`);
+  }
+  for (const v of ["1", "true", "YES", "on"]) {
+    const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TRUST_ALL_TOOLS: v });
+    assert.match(r.stdout, /^ARG:--trust-all-tools$/m, `trust lost for ${v}`);
+  }
+});
+
+test("a timeout beyond the timer limit is clamped instead of wrapping", async () => {
+  const kiro = fakeSlowKiro(2);
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: "2147483648" }).stdout
+  );
+  // An overflowed delay fired almost immediately and failed the job as a timeout.
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  assert.equal(job.status, "completed");
+  assert.doesNotMatch(job.result, /timed out/);
+});

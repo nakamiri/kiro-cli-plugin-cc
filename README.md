@@ -29,6 +29,10 @@ To require Kiro's own per-tool confirmations instead:
 export KIRO_PLUGIN_TRUST_ALL_TOOLS=0
 ```
 
+The variable fails closed: once it is set, trust is kept only for an explicitly
+affirmative value (`1`, `true`, `yes`, `on`), so a typo reduces trust rather
+than silently granting it.
+
 `/kiro-cli:setup` reports which mode is active.
 
 ## Configuration
@@ -36,10 +40,11 @@ export KIRO_PLUGIN_TRUST_ALL_TOOLS=0
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `KIRO_CLI_PATH` | resolved via `which kiro-cli` | Explicit path to the `kiro-cli` binary |
-| `KIRO_PLUGIN_TRUST_ALL_TOOLS` | enabled | Set to `0` to drop `--trust-all-tools` |
+| `KIRO_PLUGIN_TRUST_ALL_TOOLS` | enabled when unset | Once set, only `1`/`true`/`yes`/`on` keeps `--trust-all-tools`; anything else drops it |
 | `KIRO_PLUGIN_JOBS_DIR` | `$TMPDIR/kiro-plugin-cc-jobs-<uid>` (mode 0700) | Where background job records are stored |
 | `KIRO_PLUGIN_TIMEOUT_MS` | `300000` | Timeout for foreground runs |
 | `KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS` | `1800000` | Timeout for background jobs |
+| `KIRO_PLUGIN_MAX_OUTPUT_BYTES` | `10485760` | Cap on captured Kiro output |
 
 Job records contain Kiro's full output, including source code from private
 repositories, so the jobs directory is per-user and not world-readable.

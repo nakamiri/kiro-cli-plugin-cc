@@ -94,6 +94,8 @@ export function isPidAlive(pid) {
         return e.code === "EPERM";
     }
 }
+/** How long a record may claim "running" without ever having recorded a pid. */
+const PIDLESS_GRACE_MS = 60_000;
 /**
  * Best-effort command line for `pid`, or null when it cannot be determined.
  * Used to confirm a recorded pid is still our runner and not a recycled one
@@ -126,8 +128,22 @@ export function pidCommandLine(pid) {
  * rewritten, because the runner may still be the one holding the pid.
  */
 export function reconcile(job) {
-    if (job.status !== "running" || job.pid === undefined)
+    if (job.status !== "running")
         return job;
+    if (job.pid === undefined) {
+        // The launcher writes the record before it knows the runner's pid, so there
+        // is nothing to check liveness against in that window. A record that never
+        // gained a pid means the launcher died in it.
+        const age = Date.now() - Date.parse(job.startedAt);
+        if (!Number.isFinite(age) || age <= PIDLESS_GRACE_MS)
+            return job;
+        return {
+            ...job,
+            status: "failed",
+            finishedAt: job.finishedAt ?? new Date().toISOString(),
+            result: job.result ?? "ERROR: the job was never started (its launcher exited before recording a runner).",
+        };
+    }
     if (isPidAlive(job.pid))
         return job;
     return {
@@ -136,6 +152,10 @@ export function reconcile(job) {
         finishedAt: job.finishedAt ?? new Date().toISOString(),
         result: job.result ?? "ERROR: the Kiro runner exited without recording a result (killed or crashed).",
     };
+}
+/** The record exactly as stored, with no liveness interpretation applied. */
+export function loadJobRaw(id) {
+    return readJobFile(jobPath(id));
 }
 export function loadJob(id) {
     const job = readJobFile(jobPath(id));

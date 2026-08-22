@@ -12,6 +12,7 @@
  * Usage: node kiro-runner.js <jobId> <kiroPath> [kiroArgs...]
  */
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { loadJob, saveJob, type Job } from "./jobs.js";
 import { backgroundTimeoutMs, maxOutputBytes } from "./kiro.js";
 
@@ -43,8 +44,12 @@ function append(text: string, byteLength: number): void {
   bytes += byteLength;
   if (bytes > maxBytes) {
     truncated = true;
-    // Keep the part of this chunk that still fits rather than dropping it whole.
-    if (remaining > 0) chunks.push(text.slice(0, remaining));
+    // Keep the part of this chunk that still fits. The budget is in bytes, so
+    // slice the buffer, not the string -- one CJK character is three bytes.
+    // The decoder drops a trailing partial sequence instead of emitting U+FFFD.
+    if (remaining > 0) {
+      chunks.push(new StringDecoder("utf-8").write(Buffer.from(text, "utf-8").subarray(0, remaining)));
+    }
     chunks.push(`\n\n[output truncated at ${maxBytes} bytes]`);
     return;
   }

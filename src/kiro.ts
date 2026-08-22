@@ -1,9 +1,15 @@
 import { execFileSync } from "node:child_process";
 
-/** Kiro is given full tool trust by default; set to 0/false/no to opt out. */
+/**
+ * Kiro is given full tool trust when the variable is unset, which is the
+ * documented default. Once it is set, only an explicitly affirmative value
+ * keeps trust on: an unrecognised value such as "off" or "disabled" clearly
+ * means the operator wanted trust reduced, so fail closed rather than open.
+ */
 export function trustAllTools(): boolean {
   const v = process.env.KIRO_PLUGIN_TRUST_ALL_TOOLS;
-  return !(v === "0" || v === "false" || v === "no");
+  if (v === undefined) return true;
+  return ["1", "true", "yes", "on"].includes(v.trim().toLowerCase());
 }
 
 export function chatArgs(prompt: string): string[] {
@@ -27,11 +33,15 @@ export function findKiro(): string | null {
   }
 }
 
+/** setTimeout stores its delay in a signed 32-bit int and silently wraps past this. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 function positiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
   const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), MAX_TIMER_MS);
 }
 
 /** Foreground runs block the caller, so they get the shorter budget. */

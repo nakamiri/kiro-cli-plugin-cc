@@ -15,8 +15,14 @@ beforeEach(() => {
 });
 
 // Import after setting the env var so the module reads it lazily via getJobsDir().
-const { saveJob, loadJob, listJobs, cancel, status, result, getJobsDir } =
+const { saveJob, loadJob, loadJobRaw, listJobs, cancel, status, result, getJobsDir } =
   await import("../plugins/kiro-cli/scripts/lib/kiro-companion.js");
+
+// A record that claims "running" is only believed while it plausibly still is:
+// the launcher records a pid within milliseconds, so a pid-less "running"
+// record from months ago means the launcher died. Fixtures for a job that is
+// meant to be genuinely in flight therefore have to be recent.
+const NOW = () => new Date().toISOString();
 
 test("getJobsDir: respects KIRO_PLUGIN_JOBS_DIR env var", () => {
   assert.equal(getJobsDir(), tmpJobsDir);
@@ -27,11 +33,23 @@ test("saveJob + loadJob: roundtrip", () => {
     id: "test-1",
     kind: "review",
     status: "running",
+    startedAt: NOW(),
+  };
+  saveJob(job);
+  assert.deepEqual(loadJob("test-1"), job);
+});
+
+test("saveJob + loadJobRaw: stores a record verbatim, without interpretation", () => {
+  // loadJob reports a stale in-flight record as failed; loadJobRaw must not.
+  const job = {
+    id: "test-raw",
+    kind: "review",
+    status: "running",
     startedAt: "2026-01-01T00:00:00.000Z",
   };
   saveJob(job);
-  const loaded = loadJob("test-1");
-  assert.deepEqual(loaded, job);
+  assert.deepEqual(loadJobRaw("test-raw"), job);
+  assert.equal(loadJob("test-raw").status, "failed");
 });
 
 test("loadJob: returns null for missing job", () => {
@@ -101,7 +119,7 @@ test("result command: by ID returns that job's result", () => {
 });
 
 test("result command: warns when job is still running", () => {
-  saveJob({ id: "r1", kind: "rescue", status: "running", startedAt: "2026-01-01T00:00:00.000Z" });
+  saveJob({ id: "r1", kind: "rescue", status: "running", startedAt: NOW() });
   const out = result(["r1"]);
   assert.match(out, /still running/);
 });
@@ -117,7 +135,7 @@ test("result command: reports no completed jobs", () => {
 });
 
 test("cancel command: marks specified job as cancelled", () => {
-  saveJob({ id: "c1", kind: "review", status: "running", startedAt: "2026-01-01T00:00:00.000Z" });
+  saveJob({ id: "c1", kind: "review", status: "running", startedAt: NOW() });
   const out = cancel(["c1"]);
   assert.match(out, /Cancelled job c1/);
   const reloaded = loadJob("c1");
@@ -127,7 +145,7 @@ test("cancel command: marks specified job as cancelled", () => {
 
 test("cancel command: with no ID cancels first running job", () => {
   saveJob({ id: "done", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z" });
-  saveJob({ id: "live", kind: "rescue", status: "running", startedAt: "2026-01-02T00:00:00.000Z" });
+  saveJob({ id: "live", kind: "rescue", status: "running", startedAt: NOW() });
   const out = cancel([]);
   assert.match(out, /Cancelled job live/);
   assert.equal(loadJob("live").status, "cancelled");
@@ -142,4 +160,13 @@ test("cancel command: reports when no running jobs", () => {
 test("cancel command: reports missing job", () => {
   const out = cancel(["nope"]);
   assert.match(out, /No job found with ID: nope/);
+});
+
+test("a pid-less running record is reported as failed once its launch window passes", () => {
+  // Written by the launcher before it knew the runner's pid; it never came back.
+  saveJob({ id: "stillborn", kind: "review", status: "running", startedAt: "2026-01-01T00:00:00.000Z" });
+  const job = loadJob("stillborn");
+  assert.equal(job.status, "failed");
+  assert.match(job.result, /never started/);
+  assert.equal(cancel([]), "No running jobs to cancel.");
 });
