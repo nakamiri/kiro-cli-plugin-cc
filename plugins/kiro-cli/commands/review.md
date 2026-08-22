@@ -14,10 +14,14 @@ Core constraint:
 
 Choose the execution mode **before** running anything:
 - `--wait` present: run in the foreground.
-- `--background` present: run in the background.
+- `--background` present: forward it to the script.
 - Neither: check the size of the change first (`git diff --stat`). Beyond 1-2
-  files, add `--background` and tell the user why. Otherwise run in the
-  foreground.
+  files, add `--background` to the arguments and tell the user why. Otherwise
+  run in the foreground.
+
+"Background" here always means passing `--background` to the script, never the
+`Bash` tool's `run_in_background`: the script detaches the job itself and needs
+to print the job ID back to you.
 
 Then make exactly one `Bash` call, forwarding the arguments as separate
 single-quoted arguments, for example:
@@ -32,6 +36,10 @@ prompt. Never paste the raw arguments in unchecked, and never wrap them in a
 command substitution -- that stops the prefix rule from matching and turns
 every invocation into a prompt. Concretely:
 
+- Forward each flag as its own argument: `'--background'`, `'--base' 'main'`.
+  The script matches flags against whole arguments, so a flag buried inside a
+  larger string is treated as prompt text, not as a flag.
+- Put all remaining free-form text in one final argument.
 - Single-quote each argument you forward.
 - Write an embedded single quote as `'\''`.
 - If an argument spans lines, or you cannot quote it confidently, forward it
@@ -48,7 +56,5 @@ KIRO_ARGS_a41f7c2e
 A foreground review can take up to 300 seconds, so set the `Bash` tool timeout
 to at least 310000 for it.
 
-`--background` starts a detached job and prints
-`{"jobId": "...", "status": "started"}` immediately. Do not also use
-`run_in_background` -- the job already outlives the command. Report the job ID
-and tell the user to check `/kiro-cli:status`.
+`--background` makes the script print `{"jobId": "...", "status": "started"}`
+immediately. Report the job ID and tell the user to check `/kiro-cli:status`.

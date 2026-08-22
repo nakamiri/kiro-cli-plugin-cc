@@ -224,16 +224,13 @@ export function cancel(args: string[]): string {
   if (job.status !== "running") {
     return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
   }
-  let note = "";
   let signalled = false;
   if (job.pid !== undefined && isPidAlive(job.pid)) {
-    const cmd = pidCommandLine(job.pid);
-    if (cmd !== null && !(cmd.includes("kiro-runner") && cmd.includes(job.id))) {
-      // The pid was recycled by an unrelated process. Signalling it -- let
-      // alone its whole process group -- would hit an innocent bystander.
-      note = `\n  Note: pid ${job.pid} now belongs to another process; no signal was sent.`;
-    } else if (cmd === null) {
-      // Identity could not be confirmed, so use the narrowest possible signal.
+    // reconcile() already refuses to call a job "running" when its pid demonstrably
+    // belongs to something else, so a recycled pid never reaches this point. It
+    // cannot rule out a pid whose command line is unreadable, though, and
+    // signalling a whole group on an unverifiable pid is too broad.
+    if (pidCommandLine(job.pid) === null) {
       try { process.kill(job.pid, "SIGTERM"); signalled = true; } catch { /* already dead */ }
     } else {
       try {
@@ -250,7 +247,7 @@ export function cancel(args: string[]): string {
     const settled = awaitRunnerRecord(job.id);
     // The runner got there first and kept the partial output; leave it alone.
     if (settled && settled.status !== "running") {
-      return `Cancelled job ${job.id} (recorded as ${settled.status})${note}`;
+      return `Cancelled job ${job.id} (recorded as ${settled.status})`;
     }
   }
   // Nothing to signal, or the runner died without recording: record it here,
@@ -260,23 +257,18 @@ export function cancel(args: string[]): string {
     return `Job ${job.id} is already ${base.status}; nothing to cancel.`;
   }
   saveJob({ ...base, status: "cancelled", finishedAt: new Date().toISOString() });
-  return `Cancelled job ${job.id}${note}`;
+  return `Cancelled job ${job.id}`;
 }
 
 // --- Main ---
 
 /**
- * Slash commands interpolate `$ARGUMENTS` into a shell command line, so the
- * script is reached either with one argument per token or with everything in a
- * single quoted argument. Splitting on whitespace makes the two equivalent, so
- * flags such as `--background` are recognised in both shapes.
+ * Arguments are compared and forwarded as whole argv entries, never re-split.
+ * Splitting on whitespace would make prompt text that merely mentions a flag
+ * ("make --background the default") act as that flag, and would flatten the
+ * newlines and indentation of a multi-line task description.
  */
-export function tokenizeArgs(args: string[]): string[] {
-  return args.flatMap((a) => a.split(/\s+/)).filter((a) => a.length > 0);
-}
-
-export function dispatch(command: string | undefined, rawArgs: string[]): string {
-  const args = tokenizeArgs(rawArgs);
+export function dispatch(command: string | undefined, args: string[]): string {
   try {
     switch (command) {
       case "setup": return setup(args);

@@ -72,7 +72,13 @@ function finalize(status: Job["status"], result: string, sweep = false): void {
   // Raw, deliberately: the reconciled view reports a record that never got its
   // pid write as "failed", and this runner would then discard a finished run.
   const current = loadJobRaw(jobId!);
-  if (current && current.status !== "running") process.exit(0);
+  if (current && current.status !== "running") {
+    // Someone else recorded the outcome first -- most likely `cancel` after its
+    // settle window. Still tear the group down, or a SIGTERM-ignoring kiro-cli
+    // would be left with no supervisor and no timeout.
+    if (sweep) sweepGroup();
+    process.exit(0);
+  }
   const job: Job = {
     id: jobId!,
     kind: current?.kind ?? "task",

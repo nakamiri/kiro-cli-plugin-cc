@@ -338,28 +338,41 @@ test("cancel does not signal a pid that has been recycled by another process", (
   // This test process is alive but is plainly not our runner.
   writeFileSync(
     join(jobsDir, "recycled.json"),
-    JSON.stringify({ id: "recycled", kind: "review", status: "running", startedAt: "2026-01-01T00:00:00.000Z", pid: process.pid })
+    JSON.stringify({ id: "recycled", kind: "review", status: "running", startedAt: new Date().toISOString(), pid: process.pid })
   );
   const r = run(["cancel", "recycled"]);
-  assert.match(r.stdout, /Cancelled job recycled/);
-  assert.match(r.stdout, /belongs to another process; no signal was sent/);
+  // Reconciliation refuses to call it running, so cancel never reaches the pid.
+  assert.match(r.stdout, /already failed; nothing to cancel/);
   // Still here, so nothing was signalled.
   assert.equal(process.kill(process.pid, 0), true);
 });
 
-test("arguments arriving as a single shell-quoted blob are still parsed", () => {
+test("flags are recognised when forwarded as their own arguments", () => {
   const kiro = fakeEchoKiro();
-  const r = run(["review", "--base main extra focus"], { KIRO_CLI_PATH: kiro });
+  const r = run(["review", "--base", "main", "extra focus"], { KIRO_CLI_PATH: kiro });
   assert.match(r.stdout, /Compare against main\./);
   assert.match(r.stdout, /Focus on: extra focus/);
 });
 
-test("a background flag inside a single quoted blob still detaches", () => {
-  const kiro = fakeSlowKiro(5);
-  const started = Date.now();
-  const r = run(["review", "--background --base main"], { KIRO_CLI_PATH: kiro });
-  assert.equal(JSON.parse(r.stdout).status, "started");
-  assert.ok(Date.now() - started < 3000, "did not detach");
+test("prompt text that mentions a flag is not treated as that flag", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["rescue", "add a --wait flag to the CLI"], { KIRO_CLI_PATH: kiro });
+  // Splitting arguments on whitespace used to strip the word out of the task.
+  assert.match(r.stdout, /^ARG:add a --wait flag to the CLI$/m);
+});
+
+test("prompt text that mentions --background does not silently detach", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["rescue", "make --background the default"], { KIRO_CLI_PATH: kiro });
+  assert.doesNotMatch(r.stdout, /"status":"started"/);
+  assert.match(r.stdout, /^ARG:make --background the default$/m);
+});
+
+test("a multi-line task description keeps its newlines and indentation", () => {
+  const kiro = fakeEchoKiro();
+  const task = "line one\n  indented two\nline three";
+  const r = run(["rescue", task], { KIRO_CLI_PATH: kiro });
+  assert.ok(r.stdout.includes(`ARG:${task}`), `flattened: ${JSON.stringify(r.stdout)}`);
 });
 
 test("an empty quoted argument is treated as no arguments", () => {
@@ -485,4 +498,35 @@ test("a finished run is still recorded when its record lost the pid mid-flight",
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
   assert.equal(job.status, "completed");
   assert.match(job.result, /slow done/);
+});
+
+// --- Round-5 regressions ---
+
+test("a job id that escapes the jobs directory is refused", () => {
+  const outside = join(tmpDir, "outside.json");
+  writeFileSync(
+    outside,
+    JSON.stringify({ id: "outside", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", result: "SECRET CONTENT" })
+  );
+  mkdirSync(jobsDir, { recursive: true });
+  for (const id of ["../outside", "../../etc/passwd", "/etc/passwd", "..", "a/b"]) {
+    for (const cmd of ["status", "result", "cancel"]) {
+      const r = run([cmd, id]);
+      assert.equal(r.status, 0, `${cmd} ${id} exited ${r.status}`);
+      assert.doesNotMatch(r.stdout, /SECRET CONTENT/, `${cmd} ${id} read outside the jobs dir`);
+      assert.match(r.stdout, /No job found with ID/);
+    }
+  }
+});
+
+test("a running record whose pid now belongs to another process reads as failed", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // Alive, but plainly not our runner -- the shape of a pre-reboot record.
+  writeFileSync(
+    join(jobsDir, "stale.json"),
+    JSON.stringify({ id: "stale", kind: "review", status: "running", startedAt: new Date().toISOString(), pid: process.pid })
+  );
+  assert.equal(JSON.parse(run(["status", "stale"]).stdout).status, "failed");
+  // And it is no longer picked up as the job to cancel.
+  assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
 });
