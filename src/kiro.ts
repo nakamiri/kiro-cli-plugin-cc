@@ -58,7 +58,10 @@ function positiveIntEnv(name: string, fallback: number, max = Number.MAX_SAFE_IN
   // Floor first: flooring after the guard turned any value in (0, 1) into 0,
   // which zeroed the output cap and made every timeout fire immediately.
   const n = Math.floor(Number(raw));
-  if (!Number.isFinite(n) || n < 1) return fallback;
+  if (Number.isNaN(n) || n < 1) return fallback;
+  // A value that overflows to Infinity asked for "as much as possible", so give
+  // it the ceiling rather than quietly reverting to the default.
+  if (!Number.isFinite(n)) return max;
   return Math.min(n, max);
 }
 

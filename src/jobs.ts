@@ -113,11 +113,19 @@ function outPath(id: string): string {
   return join(ensureJobsDir(), `${id}${OUT_EXT}`);
 }
 
+let tmpSeq = 0;
+function nextTmpSeq(): number {
+  tmpSeq += 1;
+  return tmpSeq;
+}
+
 /** Write-then-rename, so a reader never observes a half-written file. */
 function writeAtomic(target: string, data: string): void {
   const dir = ensureJobsDir();
   // Matched by TMP_RE, so an abandoned one is recognisably ours to clean up.
-  const tmp = join(dir, `${TMP_PREFIX}${process.pid}-${target.length}.tmp`);
+  // The counter, not just the path length, is what keeps two writes from the
+  // same process apart -- they only happen to be sequential today.
+  const tmp = join(dir, `${TMP_PREFIX}${process.pid}-${nextTmpSeq()}.tmp`);
   try {
     writeFileSync(tmp, data, { mode: 0o600 });
     renameSync(tmp, target);
@@ -261,18 +269,20 @@ export function reconcile(job: Job): Job {
     const age = Date.now() - Date.parse(job.startedAt);
     // Fail closed: an unusable timestamp must not keep a job "running" forever.
     if (Number.isFinite(age) && age <= PIDLESS_GRACE_MS) return job;
+    // finishedAt is deliberately left as stored -- usually absent. Synthesizing
+    // "now" made one stale record look like the most recently finished job on
+    // every read, shadowing every genuine result for the whole retention window.
     return {
       ...job,
       status: "failed",
-      finishedAt: job.finishedAt ?? new Date().toISOString(),
       note: job.note ?? "ERROR: the job was never started (its launcher exited before recording a runner).",
     };
   }
   if (isPidAlive(job.pid) && isOurRunner(job.pid, job.id)) return job;
+  // As above: no invented finishedAt.
   return {
     ...job,
     status: "failed",
-    finishedAt: job.finishedAt ?? new Date().toISOString(),
     note: job.note ?? "ERROR: the Kiro runner exited without recording a result (killed or crashed).",
   };
 }
@@ -383,8 +393,9 @@ export function pruneJobs(): void {
   // Newest-first, so the tail is what falls outside the count cap.
   for (const job of terminal.slice(maxRetainedJobs())) doomed.add(job.id);
 
-  // Then trim by stored bytes, oldest first: fifty ten-megabyte transcripts are
-  // within the count cap and still make the store unusable.
+  // Then trim by stored bytes: fifty ten-megabyte transcripts are within the
+  // count cap and still make the store unusable. Walking newest-first and
+  // dooming once the budget is exceeded keeps the most recent runs.
   const byteBudget = maxRetainedJobBytes();
   let kept = 0;
   for (const job of terminal) {

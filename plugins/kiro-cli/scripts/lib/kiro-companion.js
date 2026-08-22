@@ -29,6 +29,14 @@ export function buildReviewPrompt(rawArgs) {
         const a = args[i];
         if (a === "--background" || a === "--wait")
             continue;
+        // --base=<ref> as well as --base <ref>: the joined form used to fall through
+        // into the focus text while the compared ref silently stayed HEAD.
+        if (a.startsWith("--base=")) {
+            const value = a.slice("--base=".length);
+            if (value !== "")
+                base = value;
+            continue;
+        }
         if (a === "--base") {
             const next = args[i + 1];
             // Neither a flag nor an empty string is a git ref: "--base --background"
@@ -306,7 +314,12 @@ export function result(args) {
         return `No job found with ID: ${id}`;
     if (job.status === "running")
         return `Job ${id} is still running. Use /kiro-cli:status to check progress.`;
-    return readJobResult(id) || job.note || "No result stored.";
+    const body = readJobResult(id) || job.note || "No result stored.";
+    // Same provenance line as the no-id path: presented bare, a partial
+    // transcript from an aborted run reads as a finished review.
+    if (job.status === "completed")
+        return body;
+    return `[job ${job.id} (${job.kind}) ${job.status}]\n\n${body}`;
 }
 export function cancel(args) {
     const id = args[0];
@@ -315,7 +328,10 @@ export function cancel(args) {
         const running = listJobs().filter((j) => j.status === "running");
         if (running.length === 0)
             return "No running jobs to cancel.";
-        job = running[0];
+        // Prefer one that can actually be cancelled. A launcher record that never
+        // recorded a pid is the newest for up to a minute, and picking it blocked
+        // cancelling an older job that really was running.
+        job = running.find((j) => j.pid !== undefined) ?? running[0];
     }
     else {
         job = loadJob(id);

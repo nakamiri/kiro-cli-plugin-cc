@@ -1265,3 +1265,68 @@ test("cancel never signals a live pid that is not one of our runners", () => {
   assert.match(r.stdout, /already failed|Could not cancel/);
   assert.equal(process.kill(1, 0), true, "pid 1 was signalled");
 });
+
+// --- Round-18 regressions ---
+
+test("a stale running record does not shadow later results", async () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // A crashed runner from an hour ago. reconcile() used to stamp it with
+  // finishedAt = now, so it looked like the newest finished job on every read
+  // and hid every genuine result for the whole retention window.
+  writeFileSync(join(jobsDir, "kiro-crashed-aa.json"), JSON.stringify({
+    id: "kiro-crashed-aa", kind: "review", status: "running",
+    startedAt: new Date(Date.now() - 3_600_000).toISOString(), pid: 4194304,
+  }));
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  const out = run(["result"]).stdout;
+  assert.match(out, /ARG:chat/);
+  assert.doesNotMatch(out, /exited without recording a result/);
+});
+
+test("cancel with no id picks a job it can actually cancel", async () => {
+  const kiro = fakeSlowKiro(20);
+  const { jobId } = JSON.parse(run(["rescue", "--background", "real work"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  // A launcher record that never recorded a pid: newest, and uncancellable.
+  writeFileSync(join(jobsDir, "kiro-zzstillborn-aa.json"), JSON.stringify({
+    id: "kiro-zzstillborn-aa", kind: "review", status: "running",
+    startedAt: new Date(Date.now() + 1000).toISOString(),
+  }));
+  const r = run(["cancel"]);
+  assert.match(r.stdout, new RegExp(`Cancelled job ${jobId}`));
+  assert.doesNotMatch(r.stdout, /still starting/);
+});
+
+test("result by id marks a run that did not complete", async () => {
+  const failing = join(tmpDir, "failing3-kiro");
+  writeFileSync(failing, '#!/bin/sh\necho "partial work"\nexit 5\n', { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: failing }).stdout);
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  const out = run(["result", jobId]).stdout;
+  assert.match(out, /partial work/);
+  // Presented bare, an aborted review read as a finished one.
+  assert.ok(out.includes(`[job ${jobId} (review) failed]`), `no provenance line: ${out}`);
+});
+
+test("--base=<ref> is honoured, not folded into the focus text", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base=release/2.x"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against release\/2\.x\./);
+  assert.doesNotMatch(r.stdout, /Focus on:/);
+});
+
+test("--base= with no value falls back to HEAD", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base="], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against HEAD\./);
+  assert.doesNotMatch(r.stdout, /Focus on:/);
+});
+
+test("an overflowing numeric setting is clamped rather than ignored", () => {
+  const kiro = fakeEchoKiro();
+  // 1e400 parses to Infinity: it used to revert to the default silently.
+  const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "1e400" });
+  assert.match(r.stdout, /^ARG:chat$/m);
+});
