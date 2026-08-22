@@ -10,9 +10,13 @@ Your only job is to forward the user's request to Kiro CLI.
 
 Forwarding rules:
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue ...`.
-- Pass `--background` as its own argument when present, and the user's task
-  text as one further single-quoted argument. The script matches flags against
-  whole arguments, so a flag mentioned inside the task text stays text.
+- Pass each flag the user gave (`--background`, `--wait`) as its own argument,
+  and the task text as one further single-quoted argument. The script matches
+  flags against whole arguments, so a flag left inside the task text is treated
+  as part of the task -- Kiro would receive a task titled `--wait ...`.
+- A foreground rescue can take up to 300 seconds, which is longer than the
+  `Bash` tool's default timeout, so set that timeout to at least 310000. With
+  `--background` the call returns at once and needs no extra timeout.
 - Write an embedded single quote as `'\''`. Never let the shell expand the
   text: if it spans lines or you cannot quote it confidently, forward it
   through a heredoc with a quoted delimiter (`<<'EOF'`) instead of inlining it.

@@ -530,3 +530,45 @@ test("a running record whose pid now belongs to another process reads as failed"
   // And it is no longer picked up as the job to cancel.
   assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
 });
+
+// --- Round-6 regressions ---
+
+test("reading a job by id also clears the symlink guard", () => {
+  if (process.getuid === undefined) return;
+  const home = join(tmpDir, "symhome2");
+  const evil = join(tmpDir, "evil");
+  mkdirSync(home);
+  mkdirSync(evil, { mode: 0o700 });
+  writeFileSync(
+    join(evil, "planted.json"),
+    JSON.stringify({ id: "planted", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", result: "ATTACKER TEXT" })
+  );
+  symlinkSync(evil, join(home, `kiro-plugin-cc-jobs-${process.getuid()}`));
+  const env = { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home };
+  for (const args of [["status"], ["status", "planted"], ["result", "planted"], ["cancel", "planted"]]) {
+    const r = spawnSync(process.execPath, [COMPANION, ...args], { encoding: "utf-8", env });
+    // The by-id path used to resolve through the link and print the record.
+    assert.doesNotMatch(r.stdout, /ATTACKER TEXT/, `${args.join(" ")} read through the link`);
+    assert.match(r.stdout, /ERROR: .*symbolic link/);
+  }
+});
+
+test("a record whose id does not match its filename is ignored, not duplicated", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(
+    join(jobsDir, "somefile.json"),
+    JSON.stringify({ id: "ghost", kind: "review", status: "running", startedAt: new Date().toISOString() })
+  );
+  // saveJob writes <id>.json, so such a record could never be updated in place:
+  // cancel reported success while the running record stayed, forever.
+  assert.equal(run(["status"]).stdout.trim(), "No Kiro jobs found.");
+  assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
+  assert.match(run(["status", "ghost"]).stdout, /No job found with ID: ghost/);
+});
+
+test("a legitimate record is still readable by id", async () => {
+  const kiro = fakeEchoKiro();
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).id, jobId);
+});

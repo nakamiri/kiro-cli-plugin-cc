@@ -33,8 +33,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main' '
 Quoting matters here. `allowed-tools` pre-approves `Bash(node:*)` for this
 command, so whatever ends up on that command line runs without a permission
 prompt. Never paste the raw arguments in unchecked, and never wrap them in a
-command substitution -- that stops the prefix rule from matching and turns
-every invocation into a prompt. Concretely:
+command substitution unless you have to -- that stops the prefix rule from
+matching and turns the invocation into a prompt. Concretely:
 
 - Forward each flag as its own argument: `'--background'`, `'--base' 'main'`.
   The script matches flags against whole arguments, so a flag buried inside a
@@ -42,13 +42,14 @@ every invocation into a prompt. Concretely:
 - Put all remaining free-form text in one final argument.
 - Single-quote each argument you forward.
 - Write an embedded single quote as `'\''`.
-- If an argument spans lines, or you cannot quote it confidently, forward it
-  through a heredoc with a quoted delimiter instead and accept the permission
-  prompt that comes with it:
+- If the free-form text spans lines, or you cannot quote it confidently, pass
+  that one argument through a heredoc with a quoted delimiter and accept the
+  permission prompt that comes with it. The flags stay separate arguments --
+  the script does not look for flags inside the text:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review "$(cat <<'KIRO_ARGS_a41f7c2e'
-<the arguments>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main' "$(cat <<'KIRO_ARGS_a41f7c2e'
+<the free-form text only, no flags>
 KIRO_ARGS_a41f7c2e
 )"
 ```

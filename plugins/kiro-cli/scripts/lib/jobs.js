@@ -52,7 +52,9 @@ export function isValidJobId(id) {
 function jobPath(id) {
     if (!isValidJobId(id))
         throw new Error(`invalid job id: ${id}`);
-    return join(getJobsDir(), `${id}.json`);
+    // ensureJobsDir, not getJobsDir: reads have to clear the symlink and
+    // ownership guards too, or a planted directory is still readable by id.
+    return join(ensureJobsDir(), `${id}.json`);
 }
 export function saveJob(job) {
     if (!isValidJobId(job.id))
@@ -74,8 +76,14 @@ export function saveJob(job) {
         throw e;
     }
 }
-/** Returns null for anything that is not a readable, well-formed job record. */
-function readJobFile(path) {
+/**
+ * Returns null for anything that is not a readable, well-formed job record for
+ * `expectedId`. The id has to match the file it came from: saveJob always
+ * writes `<id>.json`, so a record naming something else can never be updated
+ * through its own id -- it would read as running forever while a second,
+ * cancelled record accumulated alongside it.
+ */
+function readJobFile(path, expectedId) {
     let raw;
     try {
         raw = readFileSync(path, "utf-8");
@@ -94,6 +102,8 @@ function readJobFile(path) {
         return null;
     const job = parsed;
     if (typeof job.id !== "string" || typeof job.kind !== "string" || typeof job.startedAt !== "string")
+        return null;
+    if (job.id !== expectedId)
         return null;
     if (job.status !== "running" && job.status !== "completed" && job.status !== "failed" && job.status !== "cancelled") {
         return null;
@@ -188,7 +198,7 @@ export function reconcile(job) {
 export function loadJobRaw(id) {
     if (!isValidJobId(id))
         return null;
-    return readJobFile(jobPath(id));
+    return readJobFile(jobPath(id), id);
 }
 export function loadJob(id) {
     const job = loadJobRaw(id);
@@ -200,7 +210,7 @@ export function listJobs() {
     for (const f of readdirSync(dir)) {
         if (!f.endsWith(".json"))
             continue;
-        const job = readJobFile(join(dir, f));
+        const job = readJobFile(join(dir, f), f.slice(0, -".json".length));
         if (job)
             jobs.push(reconcile(job));
     }

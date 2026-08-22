@@ -64,7 +64,9 @@ export function isValidJobId(id: string): boolean {
 
 function jobPath(id: string): string {
   if (!isValidJobId(id)) throw new Error(`invalid job id: ${id}`);
-  return join(getJobsDir(), `${id}.json`);
+  // ensureJobsDir, not getJobsDir: reads have to clear the symlink and
+  // ownership guards too, or a planted directory is still readable by id.
+  return join(ensureJobsDir(), `${id}.json`);
 }
 
 export function saveJob(job: Job): void {
@@ -82,8 +84,14 @@ export function saveJob(job: Job): void {
   }
 }
 
-/** Returns null for anything that is not a readable, well-formed job record. */
-function readJobFile(path: string): Job | null {
+/**
+ * Returns null for anything that is not a readable, well-formed job record for
+ * `expectedId`. The id has to match the file it came from: saveJob always
+ * writes `<id>.json`, so a record naming something else can never be updated
+ * through its own id -- it would read as running forever while a second,
+ * cancelled record accumulated alongside it.
+ */
+function readJobFile(path: string, expectedId: string): Job | null {
   let raw: string;
   try {
     raw = readFileSync(path, "utf-8");
@@ -99,6 +107,7 @@ function readJobFile(path: string): Job | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const job = parsed as Partial<Job>;
   if (typeof job.id !== "string" || typeof job.kind !== "string" || typeof job.startedAt !== "string") return null;
+  if (job.id !== expectedId) return null;
   if (job.status !== "running" && job.status !== "completed" && job.status !== "failed" && job.status !== "cancelled") {
     return null;
   }
@@ -188,7 +197,7 @@ export function reconcile(job: Job): Job {
 /** The record exactly as stored, with no liveness interpretation applied. */
 export function loadJobRaw(id: string): Job | null {
   if (!isValidJobId(id)) return null;
-  return readJobFile(jobPath(id));
+  return readJobFile(jobPath(id), id);
 }
 
 export function loadJob(id: string): Job | null {
@@ -201,7 +210,7 @@ export function listJobs(): Job[] {
   const jobs: Job[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".json")) continue;
-    const job = readJobFile(join(dir, f));
+    const job = readJobFile(join(dir, f), f.slice(0, -".json".length));
     if (job) jobs.push(reconcile(job));
   }
   return jobs.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
