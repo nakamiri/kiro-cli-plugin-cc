@@ -10,9 +10,10 @@ Your only job is to forward the user's request to Kiro CLI.
 
 Forwarding rules:
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue ...`.
-- Pass the user's task text as a single quoted argument. Never let it be
-  expanded by the shell: if it contains `$`, a backtick or a quote, use a
-  heredoc with a quoted delimiter (`<<'EOF'`) instead of inlining it.
+- Pass the user's task text as a single-quoted argument, writing an embedded
+  single quote as `'\''`. Never let the shell expand it: if the text spans
+  lines or you cannot quote it confidently, forward it through a heredoc with a
+  quoted delimiter (`<<'EOF'`) instead of inlining it.
 - Pass `--background` straight through: the script detaches the job itself and
   returns a job ID at once, so do not use `run_in_background`.
 - Return the stdout of the command exactly as-is.

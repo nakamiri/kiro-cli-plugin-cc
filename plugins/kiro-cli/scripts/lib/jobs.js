@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 /**
@@ -24,6 +24,11 @@ export function ensureJobsDir() {
     // directory out from under them would be worse than honouring it. Records
     // are written 0600 either way.
     if (uid !== undefined && !process.env.KIRO_PLUGIN_JOBS_DIR) {
+        // lstat first: statSync would follow a symlink planted in the shared temp
+        // path, so the uid check would pass while every record landed elsewhere.
+        if (lstatSync(dir).isSymbolicLink()) {
+            throw new Error(`jobs directory ${dir} is a symbolic link; refusing to use it`);
+        }
         const st = statSync(dir);
         // A pre-created directory in the shared temp path would leak every result.
         if (st.uid !== uid) {

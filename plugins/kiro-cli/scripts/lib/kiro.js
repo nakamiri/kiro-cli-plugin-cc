@@ -22,6 +22,14 @@ export function chatArgs(prompt) {
     args.push(prompt);
     return args;
 }
+/**
+ * Node binary used for the detached runner. Overridable both because a host may
+ * want a specific interpreter and because it is the only way to exercise the
+ * spawn-failure path in a test.
+ */
+export function nodeBinary() {
+    return process.env.KIRO_PLUGIN_NODE || process.execPath;
+}
 export function findKiro() {
     if (process.env.KIRO_CLI_PATH)
         return process.env.KIRO_CLI_PATH;

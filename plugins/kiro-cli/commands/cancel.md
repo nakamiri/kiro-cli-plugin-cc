@@ -5,19 +5,19 @@ disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 
-Run exactly one command:
+Raw slash-command arguments: $ARGUMENTS
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" cancel "$(cat <<'KIRO_ARGS_a41f7c2e'
-$ARGUMENTS
-KIRO_ARGS_a41f7c2e
-)"
-```
+Work out the command line first, then make exactly one `Bash` call.
 
-The quoted heredoc delimiter is what makes this safe: the shell performs no
-expansion at all inside the body, so arguments containing `$(...)`, backticks,
-quotes or apostrophes are passed through as plain text. Do not replace it with
-an inline `'$ARGUMENTS'` -- a single quote in the arguments would end the
-quoting and the rest would run as shell commands.
+- No arguments: run `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" cancel`
+- A job ID: it must match `^kiro-[0-9a-z]+-[0-9a-z]+$`. Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" cancel '<job-id>'` with the
+  ID single-quoted.
+- Anything else: run nothing, and tell the user it is not a valid job ID.
+
+Quoting matters here. `allowed-tools` pre-approves `Bash(node:*)` for this
+command, so whatever ends up on that command line runs without a permission
+prompt. Never paste the raw arguments in unchecked, and never wrap them in a
+command substitution -- that stops the prefix rule from matching and turns
+every invocation into a prompt.
 
 Report the command output to the user verbatim.

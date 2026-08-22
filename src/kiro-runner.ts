@@ -13,7 +13,7 @@
  */
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { loadJob, saveJob, type Job } from "./jobs.js";
+import { loadJobRaw, saveJob, type Job } from "./jobs.js";
 import { backgroundTimeoutMs, maxOutputBytes } from "./kiro.js";
 
 const [jobId, kiroPath, ...kiroArgs] = process.argv.slice(2);
@@ -69,7 +69,9 @@ function finalize(status: Job["status"], result: string, sweep = false): void {
   if (finalized) return;
   finalized = true;
   // Re-read so a concurrent `cancel` that already set "cancelled" is not undone.
-  const current = loadJob(jobId!);
+  // Raw, deliberately: the reconciled view reports a record that never got its
+  // pid write as "failed", and this runner would then discard a finished run.
+  const current = loadJobRaw(jobId!);
   if (current && current.status !== "running") process.exit(0);
   const job: Job = {
     id: jobId!,
@@ -150,6 +152,9 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
     clearTimeout(timer);
     if (graceTimer) clearTimeout(graceTimer);
     settled = true;
-    finalize("cancelled", `${chunks.join("")}\n\n[cancelled]`);
+    // Sweep the group as the timeout path does: kiro-cli was signalled too, but
+    // if it or a build/test grandchild ignores SIGTERM it would keep writing to
+    // the repository under --trust-all-tools while the job reads "cancelled".
+    finalize("cancelled", `${chunks.join("")}\n\n[cancelled]`, true);
   });
 }

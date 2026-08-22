@@ -45,6 +45,7 @@ than silently granting it.
 | `KIRO_PLUGIN_TIMEOUT_MS` | `300000` | Timeout for foreground runs |
 | `KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS` | `1800000` | Timeout for background jobs |
 | `KIRO_PLUGIN_MAX_OUTPUT_BYTES` | `10485760` | Cap on captured Kiro output |
+| `KIRO_PLUGIN_NODE` | the running `node` | Node binary used to launch a background job's supervisor |
 
 Job records contain Kiro's full output, including source code from private
 repositories, so the jobs directory is per-user and not world-readable.

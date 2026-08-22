@@ -5,7 +5,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -418,4 +418,71 @@ test("a timeout beyond the timer limit is clamped instead of wrapping", async ()
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
   assert.equal(job.status, "completed");
   assert.doesNotMatch(job.result, /timed out/);
+});
+
+// --- Round-4 regressions ---
+
+test("a runner that cannot be spawned is recorded as failed, not left crashing", async () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--background"], {
+    KIRO_CLI_PATH: kiro,
+    KIRO_PLUGIN_NODE: join(tmpDir, "no-such-node"),
+  });
+  // The async 'error' event from spawn used to be unhandled: exit 1 and a stack
+  // trace, after the JSON had already been printed.
+  assert.equal(r.status, 0, `exited ${r.status}: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /ENOENT/);
+  const { jobId } = JSON.parse(r.stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
+  assert.equal(job.status, "failed");
+  assert.match(job.result, /could not start the Kiro runner/);
+});
+
+test("a symlinked default jobs directory is refused", () => {
+  if (process.getuid === undefined) return;
+  const home = join(tmpDir, "symhome");
+  const real = join(tmpDir, "elsewhere");
+  mkdirSync(home);
+  mkdirSync(real, { mode: 0o700 });
+  symlinkSync(real, join(home, `kiro-plugin-cc-jobs-${process.getuid()}`));
+  const r = spawnSync(process.execPath, [COMPANION, "status"], {
+    encoding: "utf-8",
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home },
+  });
+  // statSync followed the link, so the uid check passed and records landed in
+  // whatever the link pointed at.
+  assert.match(r.stdout, /ERROR: .*symbolic link/);
+  assert.equal(readdirSync(real).length, 0);
+});
+
+test("cancel kills a kiro-cli that ignores SIGTERM", async () => {
+  const marker = join(tmpDir, "stubborn-finished");
+  const kiro = join(tmpDir, "stubborn-kiro");
+  // Traps SIGTERM and keeps going, the way a build or test grandchild might.
+  writeFileSync(
+    kiro,
+    `#!/bin/sh\ntrap '' TERM\necho started\nsleep 2\ntouch "${marker}"\n`,
+    { mode: 0o755 }
+  );
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  await new Promise((r) => setTimeout(r, 400));
+  assert.match(run(["cancel", jobId]).stdout, /Cancelled job/);
+  await new Promise((r) => setTimeout(r, 3000));
+  assert.equal(existsSync(marker), false, "kiro-cli survived cancellation");
+});
+
+test("a finished run is still recorded when its record lost the pid mid-flight", async () => {
+  const kiro = fakeSlowKiro(3);
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  // Reconciliation would call this "failed"; the runner must not read it that
+  // way and throw away the review it just completed.
+  writeFileSync(
+    join(jobsDir, `${jobId}.json`),
+    JSON.stringify({ id: jobId, kind: "review", status: "running", startedAt: "2026-01-01T00:00:00.000Z" })
+  );
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  assert.equal(job.status, "completed");
+  assert.match(job.result, /slow done/);
 });

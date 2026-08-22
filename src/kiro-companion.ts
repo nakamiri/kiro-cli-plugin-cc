@@ -1,11 +1,11 @@
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type Job, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
-import { chatArgs, findKiro, foregroundTimeoutMs, maxOutputBytes, trustAllTools } from "./kiro.js";
+import { chatArgs, findKiro, foregroundTimeoutMs, maxOutputBytes, nodeBinary, trustAllTools } from "./kiro.js";
 
 export type { Job };
 export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
-export { findKiro, trustAllTools } from "./kiro.js";
+export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
 
@@ -78,9 +78,24 @@ function startBackgroundJob(kind: string, kiro: string, prompt: string): string 
   const job: Job = { id: genId(), kind, status: "running", startedAt: new Date().toISOString() };
   saveJob(job);
 
-  const child = spawn(process.execPath, [runnerPath(), job.id, kiro, ...chatArgs(prompt)], {
+  const child = spawn(nodeBinary(), [runnerPath(), job.id, kiro, ...chatArgs(prompt)], {
     stdio: "ignore",
     detached: true,
+  });
+  // spawn reports EAGAIN/EMFILE/EACCES asynchronously. Without a listener that
+  // event is fatal, and it would fire after dispatch() had already returned --
+  // outside its try/catch, so the command died with a stack trace.
+  child.on("error", (err) => {
+    try {
+      saveJob({
+        ...job,
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        result: `ERROR: could not start the Kiro runner: ${err.message}`,
+      });
+    } catch {
+      /* nothing more we can do from here */
+    }
   });
   child.unref();
 
