@@ -11,7 +11,8 @@ Your only job is to forward the user's request to Kiro CLI.
 Forwarding rules:
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue ...`.
 - Pass the user's task text as arguments.
-- If `--background` is present, use `run_in_background: true`.
+- Pass `--background` straight through: the script detaches the job itself and
+  returns a job ID at once, so do not use `run_in_background`.
 - Return the stdout of the command exactly as-is.
 - Do not inspect the repository, read files, or do any independent work.
 - Do not paraphrase, summarize, or add commentary.

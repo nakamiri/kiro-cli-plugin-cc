@@ -1,6 +1,7 @@
 ---
 description: Check whether kiro-cli is installed and ready
 argument-hint: ''
+disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 

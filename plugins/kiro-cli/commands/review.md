@@ -14,25 +14,17 @@ Core constraint:
 - Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Your only job is to run the review and return Kiro's output verbatim to the user.
 
-Execution mode rules:
-- If the raw arguments include `--wait`, run the review in the foreground.
-- If the raw arguments include `--background`, run the review in a Claude background task.
-- Otherwise, recommend background for anything beyond 1-2 files.
+Run exactly one command, forwarding the arguments unchanged:
 
-Foreground flow:
-- Run:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review $ARGUMENTS
 ```
-- Return the command stdout verbatim.
 
-Background flow:
-- Launch the review with `Bash` in the background:
-```typescript
-Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review $ARGUMENTS`,
-  description: "Kiro review",
-  run_in_background: true
-})
-```
-- Tell the user: "Kiro review started in the background. Check `/kiro-cli:status` for progress."
+The script decides the execution mode from the arguments itself:
+- `--background` starts a detached job and prints `{"jobId": "...", "status": "started"}` immediately.
+  Do not also use `run_in_background` -- the job already outlives the command.
+  Report the job ID and tell the user to check `/kiro-cli:status`.
+- Otherwise the review runs in the foreground; return the stdout verbatim.
+
+If the arguments contain neither `--wait` nor `--background`, recommend
+`--background` for anything beyond 1-2 files.

@@ -1,46 +1,12 @@
-import { execSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-export function getJobsDir() {
-    return process.env.KIRO_PLUGIN_JOBS_DIR || join(tmpdir(), "kiro-plugin-cc-jobs");
-}
-function ensureJobsDir() {
-    const dir = getJobsDir();
-    if (!existsSync(dir))
-        mkdirSync(dir, { recursive: true });
-}
+import { isPidAlive, listJobs, loadJob, saveJob } from "./jobs.js";
+import { MAX_OUTPUT_BYTES, chatArgs, findKiro, foregroundTimeoutMs, trustAllTools, } from "./kiro.js";
+export { getJobsDir, isPidAlive, listJobs, loadJob, saveJob } from "./jobs.js";
+export { findKiro, trustAllTools } from "./kiro.js";
+const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
 function genId() {
     return `kiro-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-}
-export function saveJob(job) {
-    ensureJobsDir();
-    writeFileSync(join(getJobsDir(), `${job.id}.json`), JSON.stringify(job, null, 2));
-}
-export function loadJob(id) {
-    const p = join(getJobsDir(), `${id}.json`);
-    if (!existsSync(p))
-        return null;
-    return JSON.parse(readFileSync(p, "utf-8"));
-}
-export function listJobs() {
-    ensureJobsDir();
-    return readdirSync(getJobsDir())
-        .filter((f) => f.endsWith(".json"))
-        .map((f) => JSON.parse(readFileSync(join(getJobsDir(), f), "utf-8")))
-        .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-}
-export function findKiro() {
-    if (process.env.KIRO_CLI_PATH)
-        return process.env.KIRO_CLI_PATH;
-    try {
-        const p = execSync("which kiro-cli", { encoding: "utf-8" }).trim();
-        return p || null;
-    }
-    catch {
-        return null;
-    }
 }
 export function buildReviewPrompt(args) {
     let base = "HEAD";
@@ -71,46 +37,56 @@ export function buildRescuePrompt(args) {
 export function hasFlag(args, flag) {
     return args.includes(flag);
 }
-function runKiro(args, background = false) {
-    const kiro = findKiro();
-    if (!kiro) {
-        return "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
-    }
-    if (background) {
-        const job = { id: genId(), kind: args[0] ?? "task", status: "running", startedAt: new Date().toISOString() };
-        saveJob(job);
-        const prompt = args.join(" ");
-        const child = spawn(kiro, ["chat", "--no-interactive", "--trust-all-tools", prompt], {
-            stdio: ["ignore", "pipe", "pipe"],
-            detached: true,
+function runnerPath() {
+    return fileURLToPath(new URL("./kiro-runner.js", import.meta.url));
+}
+/**
+ * Starts Kiro in a detached supervisor process and returns immediately. The
+ * supervisor -- not this process -- records the terminal job state, so the job
+ * completes even if the caller exits the moment this returns.
+ */
+function startBackgroundJob(kind, kiro, prompt) {
+    const job = { id: genId(), kind, status: "running", startedAt: new Date().toISOString() };
+    saveJob(job);
+    const child = spawn(process.execPath, [runnerPath(), job.id, kiro, ...chatArgs(prompt)], {
+        stdio: "ignore",
+        detached: true,
+    });
+    child.unref();
+    if (child.pid === undefined) {
+        saveJob({
+            ...job,
+            status: "failed",
+            finishedAt: new Date().toISOString(),
+            result: "ERROR: could not spawn the Kiro runner process.",
         });
-        job.pid = child.pid;
-        saveJob(job);
-        let output = "";
-        child.stdout?.on("data", (d) => { output += d.toString(); });
-        child.stderr?.on("data", (d) => { output += d.toString(); });
-        child.on("close", (code) => {
-            job.status = code === 0 ? "completed" : "failed";
-            job.finishedAt = new Date().toISOString();
-            job.result = output;
-            saveJob(job);
-        });
-        child.unref();
-        return JSON.stringify({ jobId: job.id, status: "started" });
+        return JSON.stringify({ jobId: job.id, status: "failed" });
     }
+    // The runner is its own process group leader, so cancel can signal the group.
+    job.pid = child.pid;
+    saveJob(job);
+    return JSON.stringify({ jobId: job.id, status: "started" });
+}
+function runForeground(kiro, prompt) {
     try {
-        const prompt = args.join(" ");
-        const result = execSync(`${kiro} chat --no-interactive --trust-all-tools ${JSON.stringify(prompt)}`, {
+        // execFile, not execSync: the prompt is never handed to a shell, so
+        // $(...), backticks and quotes in it cannot be interpreted as syntax.
+        return execFileSync(kiro, chatArgs(prompt), {
             encoding: "utf-8",
-            timeout: 300_000,
-            maxBuffer: 10 * 1024 * 1024,
+            timeout: foregroundTimeoutMs(),
+            maxBuffer: MAX_OUTPUT_BYTES,
         });
-        return result;
     }
     catch (e) {
         const err = e;
         return `ERROR: ${err.stderr || err.message || "kiro-cli failed"}`;
     }
+}
+function runKiro(kind, prompt, background) {
+    const kiro = findKiro();
+    if (!kiro)
+        return NOT_INSTALLED;
+    return background ? startBackgroundJob(kind, kiro, prompt) : runForeground(kiro, prompt);
 }
 // --- Commands ---
 export function setup(args) {
@@ -120,28 +96,38 @@ export function setup(args) {
         installed: !!kiro,
         path: kiro,
         version: null,
+        runnable: false,
+        trustAllTools: trustAllTools(),
+        error: null,
     };
     if (kiro) {
         try {
-            info.version = execSync(`${kiro} --version`, { encoding: "utf-8" }).trim();
+            info.version = execFileSync(kiro, ["--version"], { encoding: "utf-8", timeout: 30_000 }).trim();
+            info.runnable = true;
         }
-        catch { /* ignore */ }
+        catch (e) {
+            const err = e;
+            info.error = (err.stderr || err.message || "unknown error").trim();
+        }
     }
     if (json)
         return JSON.stringify(info);
     if (!info.installed)
         return "❌ kiro-cli is not installed.\n\nSee https://kiro.dev to download and install Kiro CLI.";
-    return `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version ?? "unknown"}`;
+    // A path that resolves but cannot be executed is not "ready" -- say so.
+    if (!info.runnable) {
+        return `❌ kiro-cli was found at ${info.path} but could not be run.\n  Error: ${info.error}\n\nCheck the path (KIRO_CLI_PATH) and that the file is executable.`;
+    }
+    const trust = info.trustAllTools
+        ? "all tools trusted (set KIRO_PLUGIN_TRUST_ALL_TOOLS=0 to disable)"
+        : "tool trust disabled";
+    return `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n  Tool trust: ${trust}`;
 }
 export function review(args) {
-    const prompt = buildReviewPrompt(args);
-    const bg = hasFlag(args, "--background");
-    return runKiro([prompt], bg);
+    return runKiro("review", buildReviewPrompt(args), hasFlag(args, "--background"));
 }
 export function rescue(args) {
-    const bg = hasFlag(args, "--background");
-    const task = buildRescuePrompt(args);
-    return runKiro([task], bg);
+    return runKiro("rescue", buildRescuePrompt(args), hasFlag(args, "--background"));
 }
 export function status(args) {
     const id = args[0];
@@ -185,50 +171,55 @@ export function cancel(args) {
         if (!job)
             return `No job found with ID: ${id}`;
     }
-    if (job.pid) {
-        try {
-            process.kill(job.pid);
-        }
-        catch { /* already dead */ }
+    // loadJob/listJobs reconcile dead runners to "failed", so a job that still
+    // reads "running" here has a live pid -- we never signal a recycled one.
+    if (job.status !== "running") {
+        return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
     }
-    job.status = "cancelled";
-    job.finishedAt = new Date().toISOString();
-    saveJob(job);
+    if (job.pid !== undefined && isPidAlive(job.pid)) {
+        try {
+            // Negative pid: the runner is a group leader, so this also stops kiro-cli.
+            process.kill(-job.pid, "SIGTERM");
+        }
+        catch {
+            try {
+                process.kill(job.pid, "SIGTERM");
+            }
+            catch { /* already dead */ }
+        }
+    }
+    saveJob({ ...job, status: "cancelled", finishedAt: new Date().toISOString() });
     return `Cancelled job ${job.id}`;
 }
 // --- Main ---
 export function dispatch(command, args) {
-    switch (command) {
-        case "setup": return setup(args);
-        case "review": return review(args);
-        case "rescue":
-        case "task": return rescue(args);
-        case "status": return status(args);
-        case "result": return result(args);
-        case "cancel": return cancel(args);
-        default: return `Unknown command: ${command}\nUsage: kiro-companion <setup|review|rescue|status|result|cancel> [args...]`;
-    }
-}
-function isMain() {
-    if (!process.argv[1])
-        return false;
     try {
-        return import.meta.url === pathToFileURL(process.argv[1]).href;
+        switch (command) {
+            case "setup": return setup(args);
+            case "review": return review(args);
+            case "rescue":
+            case "task": return rescue(args);
+            case "status": return status(args);
+            case "result": return result(args);
+            case "cancel": return cancel(args);
+            default: return `Unknown command: ${command}\nUsage: kiro-companion <setup|review|rescue|status|result|cancel> [args...]`;
+        }
     }
-    catch {
-        return false;
+    catch (e) {
+        // Slash commands render stdout, so a stack trace on stderr would be invisible.
+        return `ERROR: ${e.message}`;
     }
 }
-// Also handle being invoked through the .mjs shim that imports this file.
 function isMainOrShim() {
-    if (isMain())
-        return true;
-    // The .mjs shim lives one level up at scripts/kiro-companion.mjs
-    if (!process.argv[1])
+    const invoked = process.argv[1];
+    if (!invoked)
         return false;
     try {
-        const invoked = fileURLToPath(pathToFileURL(process.argv[1]).href);
-        return invoked.endsWith("kiro-companion.mjs");
+        const href = pathToFileURL(invoked).href;
+        if (import.meta.url === href)
+            return true;
+        // The .mjs shim lives one level up at scripts/kiro-companion.mjs
+        return fileURLToPath(href).endsWith("kiro-companion.mjs");
     }
     catch {
         return false;
