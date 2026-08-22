@@ -1,8 +1,8 @@
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isPidAlive, listJobs, loadJob, saveJob } from "./jobs.js";
-import { MAX_OUTPUT_BYTES, chatArgs, findKiro, foregroundTimeoutMs, trustAllTools, } from "./kiro.js";
-export { getJobsDir, isPidAlive, listJobs, loadJob, saveJob } from "./jobs.js";
+import { isPidAlive, listJobs, loadJob, pidCommandLine, saveJob } from "./jobs.js";
+import { chatArgs, findKiro, foregroundTimeoutMs, maxOutputBytes, trustAllTools } from "./kiro.js";
+export { getJobsDir, isPidAlive, listJobs, loadJob, pidCommandLine, saveJob } from "./jobs.js";
 export { findKiro, trustAllTools } from "./kiro.js";
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
 function genId() {
@@ -74,12 +74,16 @@ function runForeground(kiro, prompt) {
         return execFileSync(kiro, chatArgs(prompt), {
             encoding: "utf-8",
             timeout: foregroundTimeoutMs(),
-            maxBuffer: MAX_OUTPUT_BYTES,
+            maxBuffer: maxOutputBytes(),
         });
     }
     catch (e) {
         const err = e;
-        return `ERROR: ${err.stderr || err.message || "kiro-cli failed"}`;
+        // kiro may have printed a complete review and still exited non-zero (or hit
+        // the timeout). Returning only the error would throw that work away.
+        const body = typeof err.stdout === "string" ? err.stdout : "";
+        const reason = (typeof err.stderr === "string" ? err.stderr : "").trim() || err.message || "kiro-cli failed";
+        return body ? `${body}\nERROR: ${reason}` : `ERROR: ${reason}`;
     }
 }
 function runKiro(kind, prompt, background) {
@@ -176,23 +180,49 @@ export function cancel(args) {
     if (job.status !== "running") {
         return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
     }
+    let note = "";
     if (job.pid !== undefined && isPidAlive(job.pid)) {
-        try {
-            // Negative pid: the runner is a group leader, so this also stops kiro-cli.
-            process.kill(-job.pid, "SIGTERM");
+        const cmd = pidCommandLine(job.pid);
+        if (cmd !== null && !(cmd.includes("kiro-runner") && cmd.includes(job.id))) {
+            // The pid was recycled by an unrelated process. Signalling it -- let
+            // alone its whole process group -- would hit an innocent bystander.
+            note = `\n  Note: pid ${job.pid} now belongs to another process; no signal was sent.`;
         }
-        catch {
+        else if (cmd === null) {
+            // Identity could not be confirmed, so use the narrowest possible signal.
             try {
                 process.kill(job.pid, "SIGTERM");
             }
             catch { /* already dead */ }
         }
+        else {
+            try {
+                // Negated pid: the runner leads the group, so kiro-cli stops with it.
+                process.kill(-job.pid, "SIGTERM");
+            }
+            catch {
+                try {
+                    process.kill(job.pid, "SIGTERM");
+                }
+                catch { /* already dead */ }
+            }
+        }
     }
     saveJob({ ...job, status: "cancelled", finishedAt: new Date().toISOString() });
-    return `Cancelled job ${job.id}`;
+    return `Cancelled job ${job.id}${note}`;
 }
 // --- Main ---
-export function dispatch(command, args) {
+/**
+ * Slash commands interpolate `$ARGUMENTS` into a shell command line, so the
+ * script is reached either with one argument per token or with everything in a
+ * single quoted argument. Splitting on whitespace makes the two equivalent, so
+ * flags such as `--background` are recognised in both shapes.
+ */
+export function tokenizeArgs(args) {
+    return args.flatMap((a) => a.split(/\s+/)).filter((a) => a.length > 0);
+}
+export function dispatch(command, rawArgs) {
+    const args = tokenizeArgs(rawArgs);
     try {
         switch (command) {
             case "setup": return setup(args);

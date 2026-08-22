@@ -9,6 +9,9 @@ export function trustAllTools(): boolean {
 export function chatArgs(prompt: string): string[] {
   const args = ["chat", "--no-interactive"];
   if (trustAllTools()) args.push("--trust-all-tools");
+  // A prompt such as "--verbose builds are broken" would otherwise be parsed
+  // as an option. Only emitted when needed, so the common path is unchanged.
+  if (prompt.startsWith("-")) args.push("--");
   args.push(prompt);
   return args;
 }
@@ -40,4 +43,6 @@ export function backgroundTimeoutMs(): number {
   return positiveIntEnv("KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS", 1_800_000);
 }
 
-export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+export function maxOutputBytes(): number {
+  return positiveIntEnv("KIRO_PLUGIN_MAX_OUTPUT_BYTES", 10 * 1024 * 1024);
+}

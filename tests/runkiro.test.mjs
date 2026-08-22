@@ -240,12 +240,27 @@ test("the default jobs directory is per-user and not world-readable", () => {
   assert.equal(statSync(join(home, dir)).mode & 0o777, 0o700);
 });
 
-test("an existing jobs directory with loose permissions is tightened", () => {
+test("an existing default jobs directory with loose permissions is tightened", () => {
   if (process.getuid === undefined) return;
-  mkdirSync(jobsDir, { recursive: true, mode: 0o777 });
+  const home = join(tmpDir, "loosehome");
+  const dir = join(home, `kiro-plugin-cc-jobs-${process.getuid()}`);
+  mkdirSync(dir, { recursive: true, mode: 0o777 });
+  const r = spawnSync(process.execPath, [COMPANION, "status"], {
+    encoding: "utf-8",
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home },
+  });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.equal(statSync(dir).mode & 0o077, 0);
+});
+
+test("an explicitly configured jobs directory keeps the permissions it was given", () => {
+  if (process.getuid === undefined) return;
+  // The operator chose this directory; silently chmod-ing a shared one would be
+  // a surprise. Records inside it are still 0600.
+  mkdirSync(jobsDir, { recursive: true, mode: 0o755 });
   const r = run(["status"]);
   assert.equal(r.status, 0, `stderr: ${r.stderr}`);
-  assert.equal(statSync(jobsDir).mode & 0o077, 0);
+  assert.equal(statSync(jobsDir).mode & 0o777, 0o755);
 });
 
 test("job records themselves are not world-readable", async () => {
@@ -254,4 +269,100 @@ test("job records themselves are not world-readable", async () => {
   const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
   await waitForJob((j) => j.id === jobId && j.status !== "running");
   assert.equal(statSync(join(jobsDir, `${jobId}.json`)).mode & 0o077, 0);
+});
+
+// --- Round-2 regressions ---
+
+test("a job finishes when kiro-cli exits but a descendant still holds its stdout", async () => {
+  // "close" would never fire here; only reacting to "exit" finishes the job.
+  const kiro = join(tmpDir, "leaky-kiro");
+  writeFileSync(kiro, '#!/bin/sh\necho "review body"\nsleep 30 &\nexit 0\n', { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
+  assert.equal(job.status, "completed");
+  assert.match(job.result, /review body/);
+});
+
+test("a foreground run that exits non-zero still returns what kiro printed", () => {
+  const kiro = join(tmpDir, "warn-kiro");
+  writeFileSync(kiro, '#!/bin/sh\necho "THE ENTIRE REVIEW BODY"\necho "rate limited" >&2\nexit 1\n', { mode: 0o755 });
+  const r = run(["review"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /THE ENTIRE REVIEW BODY/);
+  assert.match(r.stdout, /ERROR: rate limited/);
+});
+
+test("multi-byte output survives pipe-read boundaries intact", async () => {
+  const unit = "あいうえお日本語レビュー結果";
+  const repeats = 60_000;
+  const kiro = join(tmpDir, "utf8-kiro");
+  writeFileSync(
+    kiro,
+    `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(unit)}.repeat(${repeats}));\n`,
+    { mode: 0o755 }
+  );
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 30_000);
+  assert.equal(job.status, "completed");
+  assert.equal(job.result.includes("\uFFFD"), false, "output contains replacement characters");
+  assert.equal(job.result.length, unit.length * repeats);
+});
+
+test("truncation keeps the part of the overflowing chunk that fits", async () => {
+  const kiro = join(tmpDir, "loud-kiro");
+  writeFileSync(kiro, `#!${process.execPath}\nprocess.stdout.write("x".repeat(50_000));\n`, { mode: 0o755 });
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_OUTPUT_BYTES: "1000" }).stdout
+  );
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  assert.match(job.result, /\[output truncated at 1000 bytes\]/);
+  // Without the slice the whole first chunk was dropped and nothing was kept.
+  assert.equal(job.result.replace(/\n*\[output truncated.*$/s, "").length, 1000);
+});
+
+test("a prompt starting with a dash is passed as text, not parsed as an option", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["rescue", "--verbose is broken"], { KIRO_CLI_PATH: kiro });
+  const lines = r.stdout.trim().split("\n");
+  assert.equal(lines.at(-2), "ARG:--");
+  assert.equal(lines.at(-1), "ARG:--verbose is broken");
+});
+
+test("no -- separator is emitted for an ordinary prompt", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["rescue", "tests are failing"], { KIRO_CLI_PATH: kiro });
+  assert.doesNotMatch(r.stdout, /^ARG:--$/m);
+});
+
+test("cancel does not signal a pid that has been recycled by another process", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // This test process is alive but is plainly not our runner.
+  writeFileSync(
+    join(jobsDir, "recycled.json"),
+    JSON.stringify({ id: "recycled", kind: "review", status: "running", startedAt: "2026-01-01T00:00:00.000Z", pid: process.pid })
+  );
+  const r = run(["cancel", "recycled"]);
+  assert.match(r.stdout, /Cancelled job recycled/);
+  assert.match(r.stdout, /belongs to another process; no signal was sent/);
+  // Still here, so nothing was signalled.
+  assert.equal(process.kill(process.pid, 0), true);
+});
+
+test("arguments arriving as a single shell-quoted blob are still parsed", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base main extra focus"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against main\./);
+  assert.match(r.stdout, /Focus on: extra focus/);
+});
+
+test("a background flag inside a single quoted blob still detaches", () => {
+  const kiro = fakeSlowKiro(5);
+  const started = Date.now();
+  const r = run(["review", "--background --base main"], { KIRO_CLI_PATH: kiro });
+  assert.equal(JSON.parse(r.stdout).status, "started");
+  assert.ok(Date.now() - started < 3000, "did not detach");
+});
+
+test("an empty quoted argument is treated as no arguments", () => {
+  const r = run(["status", ""]);
+  assert.match(r.stdout, /No Kiro jobs found/);
 });

@@ -6,11 +6,14 @@
  * caller -- owns the Kiro child and writes the terminal job record, which is
  * what makes a background job survive the caller exiting.
  *
+ * Kiro is deliberately left in this process's group: `cancel` signals the group
+ * by negated pid, and that is what stops kiro-cli along with the supervisor.
+ *
  * Usage: node kiro-runner.js <jobId> <kiroPath> [kiroArgs...]
  */
 import { spawn } from "node:child_process";
 import { loadJob, saveJob, type Job } from "./jobs.js";
-import { backgroundTimeoutMs, MAX_OUTPUT_BYTES } from "./kiro.js";
+import { backgroundTimeoutMs, maxOutputBytes } from "./kiro.js";
 
 const [jobId, kiroPath, ...kiroArgs] = process.argv.slice(2);
 
@@ -19,25 +22,45 @@ if (!jobId || !kiroPath) {
   process.exit(2);
 }
 
+/**
+ * kiro-cli may leave a descendant holding its stdout open after exiting, and
+ * then EOF never arrives. Once the process itself has exited, wait only this
+ * long for the pipes to drain before recording the result.
+ */
+const FLUSH_GRACE_MS = 2_000;
+
 const timeoutMs = backgroundTimeoutMs();
+const maxBytes = maxOutputBytes();
 let timedOut = false;
 let finalized = false;
 let bytes = 0;
 let truncated = false;
 const chunks: string[] = [];
 
-function append(chunk: Buffer): void {
+function append(text: string, byteLength: number): void {
   if (truncated) return;
-  bytes += chunk.length;
-  if (bytes > MAX_OUTPUT_BYTES) {
+  const remaining = maxBytes - bytes;
+  bytes += byteLength;
+  if (bytes > maxBytes) {
     truncated = true;
-    chunks.push(`\n\n[output truncated at ${MAX_OUTPUT_BYTES} bytes]`);
+    // Keep the part of this chunk that still fits rather than dropping it whole.
+    if (remaining > 0) chunks.push(text.slice(0, remaining));
+    chunks.push(`\n\n[output truncated at ${maxBytes} bytes]`);
     return;
   }
-  chunks.push(chunk.toString());
+  chunks.push(text);
 }
 
-function finalize(status: Job["status"], result: string): void {
+/** Terminates anything still left in our process group, this process included. */
+function sweepGroup(): void {
+  try {
+    process.kill(-process.pid, "SIGKILL");
+  } catch {
+    /* not a group leader, or nothing left */
+  }
+}
+
+function finalize(status: Job["status"], result: string, sweep = false): void {
   if (finalized) return;
   finalized = true;
   // Re-read so a concurrent `cancel` that already set "cancelled" is not undone.
@@ -58,6 +81,8 @@ function finalize(status: Job["status"], result: string): void {
     console.error(`kiro-runner: could not record job ${jobId}: ${(e as Error).message}`);
     process.exit(1);
   }
+  // The record is on disk before anything else in the group is torn down.
+  if (sweep) sweepGroup();
   process.exit(0);
 }
 
@@ -68,20 +93,58 @@ const timer = setTimeout(() => {
   try { child.kill("SIGKILL"); } catch { /* already gone */ }
 }, timeoutMs);
 
-child.stdout?.on("data", append);
-child.stderr?.on("data", append);
+// setEncoding decodes through a StringDecoder, so a multi-byte character split
+// across two pipe reads is not turned into replacement characters.
+child.stdout?.setEncoding("utf-8");
+child.stderr?.setEncoding("utf-8");
+child.stdout?.on("data", (d: string) => append(d, Buffer.byteLength(d)));
+child.stderr?.on("data", (d: string) => append(d, Buffer.byteLength(d)));
 
-child.on("error", (err) => {
-  clearTimeout(timer);
-  finalize("failed", `ERROR: could not run kiro-cli: ${err.message}`);
-});
+let settled = false;
 
-child.on("close", (code) => {
+function settle(code: number | null, signal: NodeJS.Signals | null): void {
+  if (settled) return;
+  settled = true;
   clearTimeout(timer);
   const output = chunks.join("");
   if (timedOut) {
-    finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`);
+    finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`, true);
+    return;
+  }
+  if (signal) {
+    finalize("failed", `${output}\n\nERROR: kiro-cli was terminated by ${signal}.`);
     return;
   }
   finalize(code === 0 ? "completed" : "failed", output);
+}
+
+let graceTimer: NodeJS.Timeout | undefined;
+
+// "exit" is the authoritative signal that kiro-cli finished; "close" only tells
+// us the pipes drained, which a lingering descendant can delay indefinitely.
+child.on("exit", (code, signal) => {
+  graceTimer = setTimeout(() => settle(code, signal), FLUSH_GRACE_MS);
 });
+
+child.on("close", (code, signal) => {
+  if (graceTimer) clearTimeout(graceTimer);
+  settle(code, signal);
+});
+
+child.on("error", (err) => {
+  clearTimeout(timer);
+  if (graceTimer) clearTimeout(graceTimer);
+  settled = true;
+  finalize("failed", `ERROR: could not run kiro-cli: ${err.message}`);
+});
+
+// `cancel` signals this whole group; handling the signal lets us record the
+// outcome instead of dying silently and leaving the job to be reconciled.
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => {
+    clearTimeout(timer);
+    if (graceTimer) clearTimeout(graceTimer);
+    settled = true;
+    finalize("cancelled", `${chunks.join("")}\n\n[cancelled]`);
+  });
+}

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -17,9 +18,14 @@ export function ensureJobsDir() {
     const dir = getJobsDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const uid = process.getuid?.();
-    if (uid !== undefined) {
+    // Ownership and mode are only enforced for the directory the plugin picks
+    // itself. An operator who points KIRO_PLUGIN_JOBS_DIR at a directory of
+    // their own has already made that call, and silently chmod-ing a shared
+    // directory out from under them would be worse than honouring it. Records
+    // are written 0600 either way.
+    if (uid !== undefined && !process.env.KIRO_PLUGIN_JOBS_DIR) {
         const st = statSync(dir);
-        // A pre-created directory owned by somebody else would leak every result.
+        // A pre-created directory in the shared temp path would leak every result.
         if (st.uid !== uid) {
             throw new Error(`jobs directory ${dir} is owned by another user (uid ${st.uid}); refusing to use it`);
         }
@@ -86,6 +92,31 @@ export function isPidAlive(pid) {
     catch (e) {
         // EPERM means the process exists but belongs to another user.
         return e.code === "EPERM";
+    }
+}
+/**
+ * Best-effort command line for `pid`, or null when it cannot be determined.
+ * Used to confirm a recorded pid is still our runner and not a recycled one
+ * before any signal is sent.
+ */
+export function pidCommandLine(pid) {
+    if (!Number.isInteger(pid) || pid <= 0)
+        return null;
+    try {
+        return readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter(Boolean).join(" ");
+    }
+    catch {
+        /* not Linux, or the process is gone */
+    }
+    try {
+        return execFileSync("ps", ["-o", "args=", "-p", String(pid)], {
+            encoding: "utf-8",
+            timeout: 5_000,
+            stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+    }
+    catch {
+        return null;
     }
 }
 /**
