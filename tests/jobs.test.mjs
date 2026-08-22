@@ -134,21 +134,24 @@ test("result command: reports no completed jobs", () => {
   assert.equal(result([]), "No completed jobs found.");
 });
 
-test("cancel command: marks specified job as cancelled", () => {
+test("cancel command: refuses a job with no runner recorded yet", () => {
+  // Only a launcher mid-flight looks like this. Reporting a cancellation we
+  // cannot perform would leave Kiro working while the user believed otherwise.
   saveJob({ id: "c1", kind: "review", status: "running", startedAt: NOW() });
   const out = cancel(["c1"]);
-  assert.match(out, /Cancelled job c1/);
-  const reloaded = loadJob("c1");
-  assert.equal(reloaded.status, "cancelled");
-  assert.ok(reloaded.finishedAt);
+  assert.match(out, /Could not cancel job c1/);
+  assert.match(out, /still starting/);
+  assert.equal(loadJob("c1").status, "running");
 });
 
-test("cancel command: with no ID cancels first running job", () => {
+test("cancel command: with no ID selects the running job", () => {
   saveJob({ id: "done", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z" });
   saveJob({ id: "live", kind: "rescue", status: "running", startedAt: NOW() });
   const out = cancel([]);
-  assert.match(out, /Cancelled job live/);
-  assert.equal(loadJob("live").status, "cancelled");
+  // It picked "live" rather than the finished record; it declines to act on it
+  // only because no runner has been recorded for it yet.
+  assert.match(out, /job live/);
+  assert.doesNotMatch(out, /done/);
   assert.equal(loadJob("done").status, "completed");
 });
 

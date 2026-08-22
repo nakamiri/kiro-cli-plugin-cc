@@ -61,25 +61,23 @@ test("setup: human-readable output includes version", () => {
   assert.match(out, /kiro-cli 1\.2\.3/);
 });
 
-test("dispatch: routes to setup", () => {
+test("dispatch: routes to setup", async () => {
   process.env.KIRO_CLI_PATH = makeFakeKiro("kiro-cli 1.0.0");
-  const out = dispatch("setup", ["--json"]);
+  const out = await dispatch("setup", ["--json"]);
   const parsed = JSON.parse(out);
   assert.equal(parsed.installed, true);
 });
 
-test("dispatch: unknown command returns usage", () => {
-  const out = dispatch("nonsense", []);
+test("dispatch: unknown command returns usage", async () => {
+  const out = await dispatch("nonsense", []);
   assert.match(out, /Unknown command: nonsense/);
   assert.match(out, /Usage: kiro-companion/);
 });
 
-test("dispatch: 'task' alias routes to rescue", () => {
-  // rescue without kiro-cli should produce the not-installed error.
+test("dispatch: 'task' alias routes to rescue", async () => {
+  // rescue with a kiro-cli that is not there should report that, not throw.
   process.env.KIRO_CLI_PATH = "/path/to/nowhere/that-does-not-exist";
-  const out = dispatch("task", ["something"]);
-  // Will hit the runKiro path; with a bad path execSync throws and we get an error.
-  // We don't assert exact wording here, only that it doesn't throw and returns a string.
+  const out = await dispatch("task", ["something"]);
   assert.equal(typeof out, "string");
   assert.ok(out.length > 0);
 });

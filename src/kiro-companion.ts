@@ -134,7 +134,18 @@ function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: numb
 const FOREGROUND_WAIT_SLACK_MS = 10_000;
 const FOREGROUND_POLL_MS = 200;
 
-function awaitResult(id: string, timeoutMs: number): string {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+/**
+ * Waits asynchronously on purpose. A synchronous wait (Atomics.wait) never
+ * yields to the event loop, so the runner -- still a child of this process in
+ * the foreground -- is never reaped: it lingers as a zombie, kill(pid, 0) keeps
+ * succeeding, and a runner that died without recording anything would hold the
+ * caller for the whole budget before reporting a timeout that never happened.
+ */
+async function awaitResult(id: string, timeoutMs: number): Promise<string> {
   const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
   for (;;) {
     // Raw: the reconciling read runs a full identity probe, which forks ps on
@@ -155,11 +166,11 @@ function awaitResult(id: string, timeoutMs: number): string {
     if (Date.now() >= deadline) {
       return `ERROR: Kiro did not finish within ${timeoutMs}ms. It is recorded as job ${id}; check /kiro-cli:status.`;
     }
-    sleepSync(FOREGROUND_POLL_MS);
+    await sleep(FOREGROUND_POLL_MS);
   }
 }
 
-function runKiro(kind: string, prompt: string, background: boolean): string {
+async function runKiro(kind: string, prompt: string, background: boolean): Promise<string> {
   const kiro = findKiro();
   if (!kiro) return NOT_INSTALLED;
   const timeoutMs = background ? backgroundTimeoutMs() : foregroundTimeoutMs();
@@ -208,11 +219,11 @@ export function setup(args: string[]): string {
   return `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n  Tool trust: ${trust}`;
 }
 
-export function review(args: string[]): string {
+export function review(args: string[]): Promise<string> {
   return runKiro("review", buildReviewPrompt(args), hasFlag(args, "--background"));
 }
 
-export function rescue(args: string[]): string {
+export function rescue(args: string[]): Promise<string> {
   return runKiro("rescue", buildRescuePrompt(args), hasFlag(args, "--background"));
 }
 
@@ -275,8 +286,14 @@ export function cancel(args: string[]): string {
   if (job.status !== "running") {
     return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
   }
+  if (job.pid === undefined) {
+    // Inside the launch window: the launcher has written the record but has not
+    // reported a runner yet. Claiming a cancellation we cannot perform would
+    // leave Kiro working while the user believed it had stopped.
+    return `Could not cancel job ${job.id}: it is still starting and has no runner recorded yet. Try again in a moment.`;
+  }
   let signalled = false;
-  if (job.pid !== undefined && isPidAlive(job.pid)) {
+  if (isPidAlive(job.pid)) {
     // reconcile() rejects a pid that demonstrably belongs to something else, so
     // a recycled pid never reaches here -- but it treats an unreadable command
     // line as a match, because refusing on that basis would fail every healthy
@@ -327,12 +344,12 @@ export function cancel(args: string[]): string {
  * ("make --background the default") act as that flag, and would flatten the
  * newlines and indentation of a multi-line task description.
  */
-export function dispatch(command: string | undefined, args: string[]): string {
+export async function dispatch(command: string | undefined, args: string[]): Promise<string> {
   try {
     switch (command) {
       case "setup": return setup(args);
-      case "review": return review(args);
-      case "rescue": case "task": return rescue(args);
+      case "review": return await review(args);
+      case "rescue": case "task": return await rescue(args);
       case "status": return status(args);
       case "result": return result(args);
       case "cancel": return cancel(args);
@@ -359,5 +376,5 @@ function isMainOrShim(): boolean {
 
 if (isMainOrShim()) {
   const [command, ...commandArgs] = process.argv.slice(2);
-  console.log(dispatch(command, commandArgs));
+  console.log(await dispatch(command, commandArgs));
 }

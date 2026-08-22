@@ -780,16 +780,30 @@ test("pruning keeps running jobs and respects the retention cap", async () => {
   run(["cancel", live.jobId]);
 });
 
-test("a foreground wait ends promptly when its runner dies without recording", async () => {
+test("a background job whose runner is killed reconciles to failed", async () => {
   const kiro = fakeSlowKiro(30);
-  // Start in the background so we can kill the runner, then confirm the same
-  // reconciliation a foreground wait relies on notices it without the deadline.
   const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
   const job = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
   process.kill(-job.pid, "SIGKILL");
   await new Promise((r) => setTimeout(r, 500));
-  const seen = JSON.parse(run(["status", jobId]).stdout);
-  assert.equal(seen.status, "failed");
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "failed");
+});
+
+test("a foreground wait ends promptly when its runner dies without recording", () => {
+  const kiro = fakeEchoKiro();
+  // /bin/true stands in for a runner that exits immediately having recorded
+  // nothing. A synchronous wait never yielded, so the runner stayed an unreaped
+  // zombie, kill(pid, 0) kept succeeding, and this blocked for the full budget.
+  const started = Date.now();
+  const r = run(["review"], {
+    KIRO_CLI_PATH: kiro,
+    KIRO_PLUGIN_NODE: "/bin/true",
+    KIRO_PLUGIN_TIMEOUT_MS: "1000",
+  });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 6000, `waited ${elapsed}ms for a runner that exited at once`);
+  assert.match(r.stdout, /ERROR/);
+  assert.doesNotMatch(r.stdout, /did not finish within/);
 });
 
 // --- Round-10 regressions ---
@@ -828,4 +842,22 @@ test("a retention age longer than the timer ceiling is honoured", () => {
   );
   run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "2592000000" });
   assert.ok(readJobs().some((j) => j.id === "kiro-aged-one"), "a 26-day-old record was pruned under a 30-day TTL");
+});
+
+test("a descendant that redirected its own stdio does not outlive the run", async () => {
+  const marker = join(tmpDir, "hidden-descendant");
+  const kiro = join(tmpDir, "hidden-desc-kiro");
+  // stdio redirected away, so it never delays close() and is invisible to the
+  // supervisor: the clean exit path was the one that left it running.
+  writeFileSync(
+    kiro,
+    `#!/bin/sh\necho "the review"\n( sleep 5; touch "${marker}" ) >/dev/null 2>&1 &\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  assert.equal(job.status, "completed");
+  assert.match(job.result, /the review/);
+  await new Promise((r) => setTimeout(r, 6500));
+  assert.equal(existsSync(marker), false, "a descendant outlived the supervisor");
 });

@@ -61,7 +61,12 @@ function append(text, byteLength) {
     }
     chunks.push(text);
 }
-/** Terminates anything still left in our process group, this process included. */
+/**
+ * Terminates anything still left in our process group, this process included.
+ * Always run once the record is on disk: kiro-cli's descendants share this
+ * group, and one that redirected its own stdio away is otherwise invisible --
+ * it would outlive the supervisor unbounded under --trust-all-tools.
+ */
 function sweepGroup() {
     try {
         process.kill(-process.pid, "SIGKILL");
@@ -70,7 +75,7 @@ function sweepGroup() {
         /* not a group leader, or nothing left */
     }
 }
-function finalize(status, result, sweep = false) {
+function finalize(status, result) {
     if (finalized)
         return;
     finalized = true;
@@ -85,16 +90,14 @@ function finalize(status, result, sweep = false) {
     }
     catch (e) {
         console.error(`kiro-runner: could not read job ${jobId}: ${e.message}`);
-        if (sweep)
-            sweepGroup();
+        sweepGroup();
         process.exit(1);
     }
     if (current && current.status !== "running") {
         // Someone else recorded the outcome first -- most likely `cancel` after its
         // settle window. Still tear the group down, or a SIGTERM-ignoring kiro-cli
         // would be left with no supervisor and no timeout.
-        if (sweep)
-            sweepGroup();
+        sweepGroup();
         process.exit(0);
     }
     const job = {
@@ -111,15 +114,12 @@ function finalize(status, result, sweep = false) {
     }
     catch (e) {
         console.error(`kiro-runner: could not record job ${jobId}: ${e.message}`);
-        // Still tear the group down when asked: failing to write the record is no
-        // reason to leave a cancelled kiro-cli running unsupervised.
-        if (sweep)
-            sweepGroup();
+        // Failing to write the record is no reason to leave kiro-cli running on.
+        sweepGroup();
         process.exit(1);
     }
     // The record is on disk before anything else in the group is torn down.
-    if (sweep)
-        sweepGroup();
+    sweepGroup();
     process.exit(0);
 }
 const child = spawn(kiroPath, kiroArgs, { stdio: ["ignore", "pipe", "pipe"] });
@@ -137,27 +137,21 @@ child.stderr?.setEncoding("utf-8");
 child.stdout?.on("data", (d) => append(d, Buffer.byteLength(d)));
 child.stderr?.on("data", (d) => append(d, Buffer.byteLength(d)));
 let settled = false;
-/**
- * `viaGrace` means the pipes never reached EOF and we stopped waiting. Something
- * in the group is still holding stdout open, so it is swept -- as on the
- * timeout, error and cancel paths -- rather than left running unsupervised
- * under --trust-all-tools.
- */
-function settle(code, signal, viaGrace = false) {
+function settle(code, signal) {
     if (settled)
         return;
     settled = true;
     clearTimeout(timer);
     const output = chunks.join("");
     if (timedOut) {
-        finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`, true);
+        finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`);
         return;
     }
     if (signal) {
-        finalize("failed", `${output}\n\nERROR: kiro-cli was terminated by ${signal}.`, viaGrace);
+        finalize("failed", `${output}\n\nERROR: kiro-cli was terminated by ${signal}.`);
         return;
     }
-    finalize(code === 0 ? "completed" : "failed", output, viaGrace);
+    finalize(code === 0 ? "completed" : "failed", output);
 }
 let graceTimer;
 // "exit" is the authoritative signal that kiro-cli finished; "close" only tells
@@ -167,7 +161,7 @@ child.on("exit", (code, signal) => {
     // to FLUSH_GRACE_MS, and a timeout expiring inside that window would relabel
     // an already-successful run as a timeout and sweep the group uninvited.
     clearTimeout(timer);
-    graceTimer = setTimeout(() => settle(code, signal, true), FLUSH_GRACE_MS);
+    graceTimer = setTimeout(() => settle(code, signal), FLUSH_GRACE_MS);
 });
 child.on("close", (code, signal) => {
     if (graceTimer)
@@ -183,7 +177,7 @@ child.on("error", (err) => {
     // the timeout kill), so keep whatever kiro produced and sweep the group.
     const output = chunks.join("");
     const detail = `ERROR: could not run kiro-cli: ${err.message}`;
-    finalize("failed", output ? `${output}\n\n${detail}` : detail, true);
+    finalize("failed", output ? `${output}\n\n${detail}` : detail);
 });
 // `cancel` signals this whole group; handling the signal lets us record the
 // outcome instead of dying silently and leaving the job to be reconciled.
@@ -193,9 +187,6 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
         if (graceTimer)
             clearTimeout(graceTimer);
         settled = true;
-        // Sweep the group as the timeout path does: kiro-cli was signalled too, but
-        // if it or a build/test grandchild ignores SIGTERM it would keep writing to
-        // the repository under --trust-all-tools while the job reads "cancelled".
-        finalize("cancelled", `${chunks.join("")}\n\n[cancelled]`, true);
+        finalize("cancelled", `${chunks.join("")}\n\n[cancelled]`);
     });
 }
