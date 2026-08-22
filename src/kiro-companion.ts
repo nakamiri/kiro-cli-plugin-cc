@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type Job, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob } from "./jobs.js";
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
@@ -132,6 +133,12 @@ function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: numb
   // The runner is its own process group leader, so cancel can signal the group.
   job.pid = child.pid;
   try {
+    // Re-read first, like the error handler above: a fast run can finalize
+    // before this write lands, and the pre-spawn snapshot would then replace a
+    // terminal record with "running" and a dead pid -- reporting a completed
+    // review as failed.
+    const current = loadJobRaw(job.id);
+    if (current && current.status !== "running") return current;
     saveJob(job);
   } catch (e) {
     // Without the pid on record the job is untrackable: cancel would report
@@ -267,12 +274,17 @@ export function status(args: string[]): string {
 export function result(args: string[]): string {
   const id = args[0];
   if (!id) {
-    const jobs = listJobs().filter((j) => j.status === "completed");
-    if (jobs.length === 0) return "No completed jobs found.";
+    // Any finished run, not just a successful one. Filtering to "completed"
+    // meant that after a failed run this quietly handed back an *older* run's
+    // transcript, and the failed one was unreachable without its id.
+    const jobs = listJobs().filter((j) => j.status !== "running");
+    if (jobs.length === 0) return "No finished jobs found.";
     const latest = jobs[0]!;
     // `||`, not `??`: a run that printed nothing stores an empty transcript,
     // and returning it verbatim made /kiro-cli:result print a blank line.
-    return readJobResult(latest.id) || latest.note || "No result stored.";
+    const body = readJobResult(latest.id) || latest.note || "No result stored.";
+    if (latest.status === "completed") return body;
+    return `[job ${latest.id} (${latest.kind}) ${latest.status}]\n\n${body}`;
   }
   const job = loadJob(id);
   if (!job) return `No job found with ID: ${id}`;
@@ -372,6 +384,30 @@ export async function dispatch(command: string | undefined, args: string[]): Pro
   }
 }
 
+const ARGS_STDIN_FLAG = "--args-stdin";
+
+/**
+ * Slash commands can only interpolate their arguments into a shell command
+ * line, and getting free-form text through that intact is entirely down to
+ * quoting it correctly -- one apostrophe in "don't break the build" unbalances
+ * it, and the rest is word-split and expanded with no permission prompt because
+ * the Bash rule is pre-approved. With this flag the text arrives on stdin
+ * instead, where nothing can reinterpret it, and only flags stay in argv.
+ */
+function readArgsFromStdin(args: string[]): string[] {
+  if (!args.includes(ARGS_STDIN_FLAG)) return args;
+  const rest = args.filter((a) => a !== ARGS_STDIN_FLAG);
+  let text = "";
+  try {
+    text = readFileSync(0, "utf-8");
+  } catch {
+    // No stdin attached (a terminal, or a closed descriptor): nothing to add.
+    return rest;
+  }
+  const trimmed = text.replace(/\n+$/, "");
+  return trimmed === "" ? rest : [...rest, trimmed];
+}
+
 function isMainOrShim(): boolean {
   const invoked = process.argv[1];
   if (!invoked) return false;
@@ -387,5 +423,5 @@ function isMainOrShim(): boolean {
 
 if (isMainOrShim()) {
   const [command, ...commandArgs] = process.argv.slice(2);
-  console.log(await dispatch(command, commandArgs));
+  console.log(await dispatch(command, readArgsFromStdin(commandArgs)));
 }

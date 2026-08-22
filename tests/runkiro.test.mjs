@@ -2,7 +2,7 @@
 // passing, background detachment, and job-store robustness. The pre-existing
 // suites never entered these paths, which is why a shell-injection bug and a
 // non-detaching "background" mode both survived.
-import { test, beforeEach, afterEach } from "node:test";
+import { test, after, beforeEach, afterEach } from "node:test";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -15,19 +15,72 @@ const COMPANION = resolve(__dirname, "..", "plugins", "kiro-cli", "scripts", "ki
 
 let tmpDir;
 let jobsDir;
+const created = [];
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "kiro-runkiro-test-"));
   jobsDir = join(tmpDir, "jobs");
+  created.push(tmpDir);
 });
 
-afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+// A runner can outlive its own afterEach by longer than that hook will wait, so
+// sweep once more at the end, when nothing this file started is still alive.
+after(() => {
+  for (const dir of created) rmSync(dir, { recursive: true, force: true });
 });
+
+afterEach(async () => {
+  // Tests start detached runners. Left alive they keep their fake kiro-cli
+  // running and recreate the jobs directory through ensureJobsDir() as soon as
+  // it is removed, which is how ~50 stale temp dirs accumulated per suite run.
+  for (const job of safeReadJobs()) {
+    if (job.status !== "running" || typeof job.pid !== "number") continue;
+    // Only ever signal a real runner. Some fixtures deliberately record
+    // process.pid to stand in for a recycled pid, and group-killing that would
+    // take this test process down with it.
+    if (!isRunnerPid(job.pid)) continue;
+    try { process.kill(-job.pid, "SIGKILL"); } catch {
+      try { process.kill(job.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+  // A runner already past its record write can still be in its flush grace and
+  // recreate the directory through ensureJobsDir(); retry until it stays gone.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await new Promise((r) => setTimeout(r, attempt === 0 ? 150 : 250));
+    rmSync(tmpDir, { recursive: true, force: true });
+    if (!existsSync(tmpDir)) break;
+  }
+});
+
+function safeReadJobs() {
+  try {
+    return readJobs();
+  } catch {
+    return [];
+  }
+}
+
+function isRunnerPid(pid) {
+  if (pid === process.pid) return false;
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf-8").includes("kiro-runner");
+  } catch {
+    return false;
+  }
+}
 
 function run(args, env = {}) {
   return spawnSync(process.execPath, [COMPANION, ...args], {
     encoding: "utf-8",
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir, ...env },
+  });
+}
+
+/** Drives the --args-stdin route the slash commands use for free-form text. */
+function runWithStdin(args, stdin, env = {}) {
+  return spawnSync(process.execPath, [COMPANION, ...args, "--args-stdin"], {
+    encoding: "utf-8",
+    input: stdin,
     env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir, ...env },
   });
 }
@@ -1092,4 +1145,60 @@ test("the PATH lookup for kiro-cli is bounded", () => {
   // Unbounded, this blocked for the full 40s before any budget could apply.
   assert.ok(elapsed < 20_000, `waited ${elapsed}ms`);
   assert.match(r.stdout, /not installed/);
+});
+
+// --- Round-16 regressions ---
+
+test("free-form text on stdin survives characters no quoting would", () => {
+  const kiro = fakeEchoKiro();
+  // The exact shape that breaks single-quoting when text is put on a command
+  // line: an apostrophe, then a command separator and a substitution.
+  const task = "don't break the build; echo INJECTED $(id -u) `hostname`";
+  const r = runWithStdin(["rescue"], `${task}\n`, { KIRO_CLI_PATH: kiro });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.ok(r.stdout.includes(`ARG:${task}`), `mangled: ${JSON.stringify(r.stdout)}`);
+  assert.doesNotMatch(r.stdout, /^INJECTED/m);
+});
+
+test("stdin text keeps its newlines and indentation", () => {
+  const kiro = fakeEchoKiro();
+  const task = "first line\n  indented\nlast line";
+  const r = runWithStdin(["rescue"], `${task}\n`, { KIRO_CLI_PATH: kiro });
+  assert.ok(r.stdout.includes(`ARG:${task}`), `mangled: ${JSON.stringify(r.stdout)}`);
+});
+
+test("flags stay in argv while the text comes from stdin", () => {
+  const kiro = fakeEchoKiro();
+  const r = runWithStdin(["review", "--base", "main"], "the auth paths\n", { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against main\./);
+  assert.match(r.stdout, /Focus on: the auth paths/);
+  assert.doesNotMatch(r.stdout, /--args-stdin/);
+});
+
+test("--args-stdin with nothing on stdin behaves as no arguments", () => {
+  const kiro = fakeEchoKiro();
+  const r = runWithStdin(["review"], "", { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against HEAD\./);
+  assert.doesNotMatch(r.stdout, /Focus on:/);
+});
+
+test("--background is still honoured alongside stdin text", () => {
+  const kiro = fakeEchoKiro();
+  const r = runWithStdin(["rescue", "--background"], "go and look\n", { KIRO_CLI_PATH: kiro });
+  assert.equal(JSON.parse(r.stdout).status, "started");
+});
+
+test("result with no id reports the newest finished run, not the newest success", async () => {
+  const echo = fakeEchoKiro();
+  const failing = join(tmpDir, "failing2-kiro");
+  writeFileSync(failing, '#!/bin/sh\necho "what actually just happened" >&2\nexit 4\n', { mode: 0o755 });
+  const ok = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: echo }).stdout);
+  await waitForJob((j) => j.id === ok.jobId && j.status !== "running");
+  const bad = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: failing }).stdout);
+  await waitForJob((j) => j.id === bad.jobId && j.status !== "running");
+
+  const out = run(["result"]).stdout;
+  // It used to filter to "completed" and hand back the earlier, successful run.
+  assert.match(out, /what actually just happened/);
+  assert.ok(out.includes(`[job ${bad.jobId} (rescue) failed]`), `no provenance line: ${out}`);
 });

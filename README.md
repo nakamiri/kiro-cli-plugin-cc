@@ -35,6 +35,22 @@ than silently granting it.
 
 `/kiro-cli:setup` reports which mode is active.
 
+### How arguments reach the script
+
+The slash commands pass flags as ordinary arguments and any free-form text on
+stdin, via `--args-stdin`:
+
+```bash
+node .../kiro-companion.mjs review '--base' 'main' --args-stdin <<'EOF'
+the auth paths
+EOF
+```
+
+A slash command can only interpolate its arguments into a shell command line,
+and getting arbitrary text through that intact depends entirely on quoting it
+correctly -- one apostrophe in "don't break the build" unbalances it. A heredoc
+body is not interpreted at all, so there is nothing to get wrong.
+
 ### Prompts are visible in the process list
 
 Kiro CLI takes its prompt as a command-line argument, so for the duration of a

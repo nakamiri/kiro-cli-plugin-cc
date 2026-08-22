@@ -23,36 +23,30 @@ Choose the execution mode **before** running anything:
 `Bash` tool's `run_in_background`: the script detaches the job itself and needs
 to print the job ID back to you.
 
-Then make exactly one `Bash` call, forwarding the arguments as separate
-single-quoted arguments, for example:
+Then make exactly one `Bash` call.
+
+**Flags only** -- forward each as its own argument:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main' 'the auth paths'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main'
 ```
 
-Quoting matters here. `allowed-tools` pre-approves `Bash(node:*)` for this
-command, so whatever ends up on that command line runs without a permission
-prompt. Never paste the raw arguments in unchecked, and never wrap them in a
-command substitution unless you have to -- that stops the prefix rule from
-matching and turns the invocation into a prompt. Concretely:
-
-- Forward each flag as its own argument: `'--background'`, `'--base' 'main'`.
-  The script matches flags against whole arguments, so a flag buried inside a
-  larger string is treated as prompt text, not as a flag.
-- Put all remaining free-form text in one final argument.
-- Single-quote each argument you forward.
-- Write an embedded single quote as `'\''`.
-- If the free-form text spans lines, or you cannot quote it confidently, pass
-  that one argument through a heredoc with a quoted delimiter and accept the
-  permission prompt that comes with it. The flags stay separate arguments --
-  the script does not look for flags inside the text:
+**With free-form focus text** -- flags stay in the command line, the text goes
+in on stdin, and `--args-stdin` tells the script to pick it up there:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main' "$(cat <<'KIRO_ARGS_a41f7c2e'
-<the free-form text only, no flags>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" review '--base' 'main' --args-stdin <<'KIRO_ARGS_a41f7c2e'
+the auth paths
 KIRO_ARGS_a41f7c2e
-)"
 ```
+
+Use the stdin form whenever there is any free-form text at all. It is not about
+convenience: `allowed-tools` pre-approves `Bash(node:*)` for this command, so
+whatever lands on that command line runs without a permission prompt, and
+getting arbitrary text safely into it depends entirely on your quoting. A single
+apostrophe -- "don't break the build" -- unbalances it and the remainder is
+word-split and expanded. The heredoc body is not interpreted at all, so there is
+nothing to get wrong. Never wrap the arguments in a command substitution.
 
 A foreground review can take up to 300 seconds, and the script waits a little
 longer than that before giving up, so set the `Bash` tool timeout to at least

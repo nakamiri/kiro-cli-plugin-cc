@@ -1,4 +1,4 @@
-import { test, beforeEach } from "node:test";
+import { test, after, beforeEach } from "node:test";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +12,12 @@ beforeEach(() => {
   }
   tmpJobsDir = mkdtempSync(join(tmpdir(), "kiro-jobs-test-"));
   process.env.KIRO_PLUGIN_JOBS_DIR = tmpJobsDir;
+});
+
+// beforeEach only clears the *previous* directory, so the last one would be
+// left behind on every run.
+after(() => {
+  if (tmpJobsDir && existsSync(tmpJobsDir)) rmSync(tmpJobsDir, { recursive: true, force: true });
 });
 
 // Import after setting the env var so the module reads it lazily via getJobsDir().
@@ -94,15 +100,12 @@ test("status command: lists multiple jobs as JSON array", () => {
   assert.equal(parsed.length, 2);
 });
 
-test("result command: returns latest completed job result by default", () => {
+test("result command: returns the latest finished job's result by default", () => {
   saveJob({ id: "old", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z" });
   saveJobResult("old", "old-output");
   saveJob({ id: "new", kind: "review", status: "completed", startedAt: "2026-01-05T00:00:00.000Z" });
   saveJobResult("new", "new-output");
-  saveJob({
-    id: "running", kind: "rescue", status: "running",
-    startedAt: "2026-01-10T00:00:00.000Z",
-  });
+  saveJob({ id: "running", kind: "rescue", status: "running", startedAt: NOW() });
   assert.equal(result([]), "new-output");
 });
 
@@ -123,9 +126,22 @@ test("result command: reports missing job", () => {
   assert.match(out, /No job found with ID: missing/);
 });
 
-test("result command: reports no completed jobs", () => {
-  saveJob({ id: "r1", kind: "rescue", status: "running", startedAt: "2026-01-01T00:00:00.000Z" });
-  assert.equal(result([]), "No completed jobs found.");
+test("result command: reports when nothing has finished yet", () => {
+  saveJob({ id: "r1", kind: "rescue", status: "running", startedAt: NOW() });
+  assert.equal(result([]), "No finished jobs found.");
+});
+
+test("result command: falls back to the newest finished job whatever its outcome", () => {
+  // Filtering to "completed" quietly handed back an older run's transcript
+  // after a failure, and left the failed run reachable only by its id.
+  saveJob({ id: "ok", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:00:00.000Z" });
+  saveJobResult("ok", "older-but-successful");
+  saveJob({ id: "bad", kind: "review", status: "failed", startedAt: "2026-01-05T00:00:00.000Z", finishedAt: "2026-01-05T00:00:00.000Z" });
+  saveJobResult("bad", "what actually just happened");
+  const out = result([]);
+  assert.match(out, /what actually just happened/);
+  assert.match(out, /\[job bad \(review\) failed\]/);
+  assert.doesNotMatch(out, /older-but-successful/);
 });
 
 test("cancel command: refuses a job with no runner recorded yet", () => {

@@ -14,10 +14,10 @@ Work out the command line first, then make exactly one `Bash` call.
   ID single-quoted.
 - Anything else: run nothing, and tell the user it is not a valid job ID.
 
-Quoting matters here. `allowed-tools` pre-approves `Bash(node:*)` for this
-command, so whatever ends up on that command line runs without a permission
-prompt. Never paste the raw arguments in unchecked, and never wrap them in a
-command substitution -- that stops the prefix rule from matching and turns
-every invocation into a prompt.
+Validate before you build the command line, not after. `allowed-tools`
+pre-approves `Bash(node:*)` here, so whatever ends up on it runs without a
+permission prompt -- but an argument that matches the job-ID pattern contains no
+shell metacharacters, so checking it first is what makes quoting sufficient.
+Never pass text through unchecked, and never wrap it in a command substitution.
 
 Present the full command output to the user. Do not summarize or condense it.

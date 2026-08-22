@@ -64,10 +64,10 @@ test("E2E: status reports no jobs initially", () => {
   assert.match(r.stdout, /No Kiro jobs found/);
 });
 
-test("E2E: result reports no completed jobs initially", () => {
+test("E2E: result reports no finished jobs initially", () => {
   const r = run(["result"]);
   assert.equal(r.status, 0);
-  assert.match(r.stdout, /No completed jobs found/);
+  assert.match(r.stdout, /No finished jobs found/);
 });
 
 test("E2E: cancel reports no running jobs initially", () => {
