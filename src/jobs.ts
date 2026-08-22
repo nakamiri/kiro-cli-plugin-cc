@@ -151,8 +151,17 @@ export function readJobResult(id: string): string | null {
   try {
     return readFileSync(outPath(id), "utf-8");
   } catch {
-    return null;
+    /* no transcript file -- may predate the split */
   }
+  // Pre-split records hold the transcript inside the metadata. Without this the
+  // commands reported "No result stored." with the body sitting right there.
+  try {
+    const parsed = JSON.parse(readFileSync(metaPath(id), "utf-8")) as { id?: unknown; result?: unknown };
+    if (parsed && parsed.id === id && typeof parsed.result === "string") return parsed.result;
+  } catch {
+    /* unreadable or not in that shape */
+  }
+  return null;
 }
 
 /**
@@ -198,7 +207,24 @@ function readJobFile(path: string, expectedId: string): Job | null {
   }
   if (job.pid !== undefined && (typeof job.pid !== "number" || !Number.isInteger(job.pid))) return null;
   if (job.note !== undefined && typeof job.note !== "string") return null;
-  return job as Job;
+  return migrateInlineResult(job as Job & { result?: unknown });
+}
+
+/**
+ * Records written before the metadata/transcript split carried the whole
+ * transcript inline. Left as-is, `status` would parse and re-emit megabytes --
+ * exactly the cost the split removed -- and the pruning byte budget would count
+ * them as nothing, since it reads resultBytes. The field is dropped here and
+ * its size accounted for; readJobResult still finds the body itself.
+ */
+function migrateInlineResult(job: Job & { result?: unknown }): Job {
+  if (typeof job.result !== "string") {
+    if ("result" in job) delete job.result;
+    return job;
+  }
+  const bytes = Buffer.byteLength(job.result);
+  delete job.result;
+  return { ...job, resultBytes: job.resultBytes ?? bytes };
 }
 
 export function isPidAlive(pid: number): boolean {

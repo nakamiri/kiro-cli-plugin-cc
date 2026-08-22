@@ -1410,3 +1410,63 @@ test("a legacy shared jobs directory is tightened and drained", () => {
   assert.equal(readdirSync(legacy).includes("kiro-oldrec-aa.json"), false, "record not drained");
   assert.ok(readdirSync(legacy).includes("keep-me.txt"), "a foreign file was deleted");
 });
+
+// --- Round-20 regressions ---
+
+function writeLegacyJob(id, body, extra = {}) {
+  writeFileSync(
+    join(jobsDir, `${id}.json`),
+    JSON.stringify({
+      id, kind: "review", status: "completed",
+      startedAt: "2026-01-02T00:00:00.000Z", finishedAt: "2026-01-02T00:00:00.000Z",
+      result: body, ...extra,
+    })
+  );
+}
+
+test("a pre-split record's transcript is still readable", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeLegacyJob("kiro-legacy-aa", "the old review body");
+  // The commands read <id>.out only, so this reported "No result stored." with
+  // the body sitting in the metadata.
+  assert.match(run(["result", "kiro-legacy-aa"]).stdout, /the old review body/);
+  assert.match(run(["result"]).stdout, /the old review body/);
+});
+
+test("status does not re-emit a pre-split inline transcript", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  const body = "z".repeat(60_000);
+  writeLegacyJob("kiro-legacyfat-aa", body);
+  const listed = JSON.parse(run(["status"]).stdout);
+  assert.equal(listed.length, 1);
+  // Returned verbatim, the record put the whole transcript back into `status`.
+  assert.equal(listed[0].result, undefined);
+  assert.equal(listed[0].resultBytes, body.length);
+});
+
+test("a pre-split transcript counts against the pruning byte budget", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  for (const n of ["a", "b", "c"]) writeLegacyJob(`kiro-legacyb${n}-aa`, "q".repeat(600));
+  // resultBytes was absent, so the budget counted these megabyte-scale bodies
+  // as zero and never pruned them.
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_MAX_JOBS: "50" });
+  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-legacyb"));
+  assert.ok(left.length <= 2, `kept ${left}`);
+});
+
+test("setup does not let kiro-cli's stderr into its own output", () => {
+  const noisy = join(tmpDir, "noisy-version-kiro");
+  writeFileSync(
+    noisy,
+    '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "warning: config is stale" >&2; echo "kiro-cli 3.2.1"; exit 0; fi\nexit 0\n',
+    { mode: 0o755 }
+  );
+  const r = run(["setup", "--json"], { KIRO_CLI_PATH: noisy });
+  // execFileSync echoes child stderr to ours unless stdio is given, which made
+  // the combined output unparseable.
+  assert.equal(r.stderr, "", `stderr leaked: ${r.stderr}`);
+  const info = JSON.parse(r.stdout);
+  assert.equal(info.version, "kiro-cli 3.2.1");
+  assert.equal(info.runnable, true);
+});

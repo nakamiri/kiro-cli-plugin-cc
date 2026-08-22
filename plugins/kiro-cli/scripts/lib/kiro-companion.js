@@ -246,6 +246,9 @@ export function setup(args) {
                 timeout: 30_000,
                 // Without this the timeout only sends SIGTERM and then keeps waiting.
                 killSignal: "SIGKILL",
+                // execFileSync echoes the child's stderr to ours unless stdio is given,
+                // so a kiro-cli that warns on --version polluted this command's output.
+                stdio: ["ignore", "pipe", "pipe"],
             }).trim();
             info.runnable = true;
         }
