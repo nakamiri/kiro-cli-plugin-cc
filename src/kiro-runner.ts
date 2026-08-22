@@ -126,8 +126,12 @@ function finalize(status: Job["status"], result: string): void {
   }
   if (current.status !== "running") {
     // Someone else recorded the outcome first -- most likely `cancel` after its
-    // settle window. Still tear the group down, or a SIGTERM-ignoring kiro-cli
-    // would be left with no supervisor and no timeout.
+    // settle window. The record is theirs to keep, but the transcript is ours:
+    // exiting without writing it made /kiro-cli:result report "No output was
+    // recorded." for a run that had produced a full review.
+    try { saveJobResult(jobId!, result); } catch { /* nothing more to do */ }
+    // Still tear the group down, or a SIGTERM-ignoring kiro-cli would be left
+    // with no supervisor and no timeout.
     sweepGroup();
     process.exit(0);
   }

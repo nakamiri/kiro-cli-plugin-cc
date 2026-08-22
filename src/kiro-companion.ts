@@ -262,12 +262,19 @@ async function runKiro(kind: string, prompt: string, background: boolean): Promi
 export function setup(args: string[]): string {
   const kiro = findKiro();
   const json = args.includes("--json");
+  const foreground = foregroundTimeoutMs();
   const info = {
     installed: !!kiro,
     path: kiro,
     version: null as string | null,
     runnable: false,
     trustAllTools: trustAllTools(),
+    foregroundTimeoutMs: foreground,
+    // What a caller must allow a foreground run, budget plus this side's own
+    // slack. Reported rather than left to the commands to hard-code, since
+    // KIRO_PLUGIN_TIMEOUT_MS is configurable and a stale literal would have the
+    // caller kill the run before it could report anything.
+    recommendedBashTimeoutMs: foreground + FOREGROUND_WAIT_SLACK_MS + 10_000,
     error: null as string | null,
   };
   if (kiro) {
@@ -296,7 +303,12 @@ export function setup(args: string[]): string {
   const trust = info.trustAllTools
     ? "all tools trusted (set KIRO_PLUGIN_TRUST_ALL_TOOLS=0 to disable)"
     : "tool trust disabled";
-  return `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n  Tool trust: ${trust}`;
+  return (
+    `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n` +
+    `  Tool trust: ${trust}\n` +
+    `  Foreground budget: ${info.foregroundTimeoutMs}ms ` +
+    `(allow ${info.recommendedBashTimeoutMs}ms for a foreground run)`
+  );
 }
 
 export function review(args: string[]): Promise<string> {

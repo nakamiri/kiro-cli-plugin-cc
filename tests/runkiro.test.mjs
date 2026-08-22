@@ -1694,3 +1694,62 @@ test("the byte budget stops at the first record that overflows it", () => {
   const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-cum") && f.endsWith(".json"));
   assert.deepEqual(left, ["kiro-cumnew-aa.json"]);
 });
+
+// --- Round-26 regressions ---
+
+test("a pre-upgrade store is carried into the current one, not left to rot", () => {
+  if (process.getuid === undefined) return;
+  const home = join(tmpDir, "migratehome");
+  const legacy = join(home, "kiro-plugin-cc-jobs");
+  mkdirSync(legacy, { recursive: true, mode: 0o755 });
+  // main's exact record shape: transcript inline, no per-uid directory.
+  writeFileSync(join(legacy, "kiro-oldjob-aa.json"), JSON.stringify({
+    id: "kiro-oldjob-aa", kind: "review", status: "completed",
+    startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:00:00.000Z",
+    result: "the review from before the upgrade",
+  }), { mode: 0o644 });
+  writeFileSync(join(legacy, "keep-me.txt"), "not ours");
+
+  const env = { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home };
+  // A read-only command is enough: it used to take a job start, and even then
+  // only aged the records out where nothing could read them.
+  const listed = JSON.parse(spawnSync(process.execPath, [COMPANION, "status"], { encoding: "utf-8", env }).stdout);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].id, "kiro-oldjob-aa");
+  const body = spawnSync(process.execPath, [COMPANION, "result", "kiro-oldjob-aa"], { encoding: "utf-8", env }).stdout;
+  assert.match(body, /the review from before the upgrade/);
+  // And the world-readable directory is gone, its foreign file left behind.
+  assert.ok(readdirSync(legacy).includes("keep-me.txt"), "a foreign file was removed");
+  assert.equal(readdirSync(legacy).includes("kiro-oldjob-aa.json"), false, "record not migrated");
+  assert.equal(statSync(legacy).mode & 0o077, 0, "still world-readable");
+});
+
+test("a cancelled run keeps the output it had already produced", async () => {
+  const kiro = join(tmpDir, "verbose-cancel-kiro");
+  writeFileSync(kiro, '#!/bin/sh\necho "a full review, as it happens"\nsleep 30\n', { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  await new Promise((r) => setTimeout(r, 600));
+  run(["cancel", jobId]);
+  await new Promise((r) => setTimeout(r, 2500));
+  // When cancel won the settle race the runner exited without writing the
+  // transcript at all, so result reported that nothing had been produced.
+  const out = run(["result", jobId]).stdout;
+  assert.match(out, /a full review, as it happens/);
+  assert.doesNotMatch(out, /No output was recorded/);
+});
+
+test("setup reports the Bash timeout a foreground run needs", () => {
+  const kiro = fakeEchoKiro();
+  const info = JSON.parse(run(["setup", "--json"], { KIRO_CLI_PATH: kiro }).stdout);
+  assert.equal(info.foregroundTimeoutMs, 300_000);
+  assert.ok(info.recommendedBashTimeoutMs > info.foregroundTimeoutMs);
+
+  const raised = JSON.parse(
+    run(["setup", "--json"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "900000" }).stdout
+  );
+  // The commands used to hard-code 320000, which a raised budget outlives.
+  assert.equal(raised.foregroundTimeoutMs, 900_000);
+  assert.ok(raised.recommendedBashTimeoutMs > 900_000);
+  assert.match(run(["setup"], { KIRO_CLI_PATH: kiro }).stdout, /allow \d+ms for a foreground run/);
+});

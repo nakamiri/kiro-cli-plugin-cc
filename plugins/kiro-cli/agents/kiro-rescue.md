@@ -37,10 +37,13 @@ KIRO_ARGS_<pick-your-own>
   this command is pre-approved -- a mistake would run without a prompt.
 - `--background` goes straight through: the script detaches the job itself and
   returns a job ID at once, so do not use `run_in_background`.
-- A foreground rescue can take up to 300 seconds -- longer than the `Bash`
-  tool's default timeout -- and the script waits a little longer than that
-  before giving up, so set that timeout to at least 320000. With `--background`
-  the call returns at once and needs no extra timeout.
+- A foreground rescue runs until the script's own budget expires -- longer than
+  the `Bash` tool's default timeout -- and the script waits a little beyond that
+  before giving up, so set that timeout larger than both: 320000 with the
+  default budget. The budget is configurable, so if it may have been changed,
+  read `recommendedBashTimeoutMs` from
+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" setup --json` and use
+  that. With `--background` the call returns at once and needs no extra timeout.
 - Return the stdout of the command exactly as-is.
 - Do not inspect the repository, read files, or do any independent work.
 - Do not paraphrase, summarize, or add commentary.

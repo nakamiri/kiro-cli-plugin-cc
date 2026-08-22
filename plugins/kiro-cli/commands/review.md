@@ -61,9 +61,12 @@ line, so check it first: it must match `^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$`
 the user it is not a usable git ref. The script rejects anything else too, but
 the check belongs before the command line is built, not after.
 
-A foreground review can take up to 300 seconds, and the script waits a little
-longer than that before giving up, so set the `Bash` tool timeout to at least
-320000 for it.
+A foreground review runs until the script's own budget expires, and the script
+waits a little beyond that before giving up, so the `Bash` tool timeout has to
+be larger than both. With the default budget that is 320000. The budget is
+configurable (`KIRO_PLUGIN_TIMEOUT_MS`), so if it may have been changed, read
+`recommendedBashTimeoutMs` from `/kiro-cli:setup --json` and use that instead of
+assuming the default.
 
 `--background` makes the script print `{"jobId": "...", "status": "started"}`
 immediately. Report the job ID and tell the user to check `/kiro-cli:status`.

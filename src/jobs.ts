@@ -77,6 +77,7 @@ export function ensureJobsDir(): string {
     // `mkdir -p` leaves the mode of an existing directory alone.
     if ((st.mode & 0o077) !== 0) chmodSync(dir, 0o700);
   }
+  migrateLegacyJobsDir(dir);
   return dir;
 }
 
@@ -443,19 +444,29 @@ function ageOf(dir: string, name: string): number {
  * strictly alone. Best effort throughout -- housekeeping must not be able to
  * fail a job.
  */
+let legacyMigrated = false;
+
 /**
  * The default jobs directory gained a per-user suffix, which left any
  * pre-upgrade store behind at the old shared path -- still holding transcripts,
- * and created with the default mode, so world-readable. Nothing reads it any
- * more, so tighten it, let its contents age out under the same rules as the
- * current store, and remove it once empty. Only files this plugin could have
- * generated are touched, and only ones we own.
+ * created with the default mode so world-readable, and no longer read by
+ * anything. Its records are moved into the current store rather than left to
+ * age out: they are the only records that can still hold a transcript inline,
+ * and draining them meant the compatibility code for that shape had nothing to
+ * read. Only names this plugin could have generated are moved, nothing already
+ * present is overwritten, and anything else in the directory is left alone.
+ *
+ * Runs at most once per process, from ensureJobsDir, so a user who only ever
+ * runs `status` still gets the old directory tightened and carried over.
  */
-function drainLegacyJobsDir(): void {
+function migrateLegacyJobsDir(target: string): void {
+  if (legacyMigrated) return;
+  legacyMigrated = true;
   if (process.env.KIRO_PLUGIN_JOBS_DIR) return;
   const uid = process.getuid?.();
   if (uid === undefined) return;
   const legacy = join(tmpdir(), "kiro-plugin-cc-jobs");
+  if (legacy === target) return;
   try {
     if (lstatSync(legacy).isSymbolicLink()) return;
     const st = statSync(legacy);
@@ -465,7 +476,6 @@ function drainLegacyJobsDir(): void {
     return; // not there, or not ours to touch
   }
 
-  const ttl = jobTtlMs();
   let names: string[];
   try {
     names = readdirSync(legacy);
@@ -473,13 +483,16 @@ function drainLegacyJobsDir(): void {
     return;
   }
   for (const name of names) {
-    const isOurs =
-      TMP_RE.test(name) ||
-      (name.endsWith(META_EXT) && GENERATED_ID_RE.test(name.slice(0, -META_EXT.length))) ||
-      (name.endsWith(OUT_EXT) && GENERATED_ID_RE.test(name.slice(0, -OUT_EXT.length)));
-    if (!isOurs) continue;
-    if (ageOf(legacy, name) <= ttl) continue;
-    try { unlinkSync(join(legacy, name)); } catch { /* best effort */ }
+    if (TMP_RE.test(name)) {
+      try { unlinkSync(join(legacy, name)); } catch { /* best effort */ }
+      continue;
+    }
+    const ext = name.endsWith(META_EXT) ? META_EXT : name.endsWith(OUT_EXT) ? OUT_EXT : null;
+    if (ext === null) continue;
+    if (!GENERATED_ID_RE.test(name.slice(0, -ext.length))) continue;
+    const to = join(target, name);
+    if (existsSync(to)) continue;
+    try { renameSync(join(legacy, name), to); } catch { /* leave it where it is */ }
   }
   try {
     if (readdirSync(legacy).length === 0) rmdirSync(legacy);
@@ -489,7 +502,6 @@ function drainLegacyJobsDir(): void {
 }
 
 export function pruneJobs(): void {
-  drainLegacyJobsDir();
   let dir: string;
   let names: string[];
   try {
