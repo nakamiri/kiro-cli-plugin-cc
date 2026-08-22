@@ -54,8 +54,9 @@ KIRO_ARGS_a41f7c2e
 )"
 ```
 
-A foreground review can take up to 300 seconds, so set the `Bash` tool timeout
-to at least 310000 for it.
+A foreground review can take up to 300 seconds, and the script waits a little
+longer than that before giving up, so set the `Bash` tool timeout to at least
+320000 for it.
 
 `--background` makes the script print `{"jobId": "...", "status": "started"}`
 immediately. Report the job ID and tell the user to check `/kiro-cli:status`.

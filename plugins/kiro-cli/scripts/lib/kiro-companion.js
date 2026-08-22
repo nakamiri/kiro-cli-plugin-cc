@@ -1,8 +1,8 @@
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
+import { isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, saveJob } from "./jobs.js";
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
-export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
+export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, saveJob } from "./jobs.js";
 export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
 function genId() {
@@ -75,6 +75,8 @@ function runnerPath() {
 function startRunner(kind, kiro, prompt, timeoutMs) {
     const job = { id: genId(), kind, status: "running", startedAt: new Date().toISOString() };
     saveJob(job);
+    // Once per job, which is the natural point to keep the store bounded.
+    pruneJobs();
     const child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)], { stdio: "ignore", detached: true });
     // spawn reports EAGAIN/EMFILE/EACCES asynchronously. Without a listener that
     // event is fatal, and it would fire after dispatch() had already returned --
@@ -126,7 +128,13 @@ const FOREGROUND_POLL_MS = 200;
 function awaitResult(id, timeoutMs) {
     const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
     for (;;) {
-        const job = loadJob(id);
+        // Raw: the reconciling read runs a full identity probe, which forks ps on
+        // every platform without /proc -- around 1500 times over a long review.
+        // A dead runner is caught by the cheap liveness check below instead.
+        let job = loadJobRaw(id);
+        if (job && job.status === "running" && job.pid !== undefined && !isPidAlive(job.pid)) {
+            job = loadJob(id);
+        }
         if (job && job.status !== "running") {
             const body = job.result ?? "";
             if (job.status === "completed")
@@ -266,17 +274,15 @@ export function cancel(args) {
         return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
     }
     let signalled = false;
+    let note = "";
     if (job.pid !== undefined && isPidAlive(job.pid)) {
-        // reconcile() already refuses to call a job "running" when its pid demonstrably
-        // belongs to something else, so a recycled pid never reaches this point. It
-        // cannot rule out a pid whose command line is unreadable, though, and
-        // signalling a whole group on an unverifiable pid is too broad.
+        // reconcile() rejects a pid that demonstrably belongs to something else, so
+        // a recycled pid never reaches here -- but it treats an unreadable command
+        // line as a match, because refusing on that basis would fail every healthy
+        // job. That leaves identity unproven, and an unproven pid is not something
+        // to send a signal to, let alone signal a whole group of.
         if (pidCommandLine(job.pid) === null) {
-            try {
-                process.kill(job.pid, "SIGTERM");
-                signalled = true;
-            }
-            catch { /* already dead */ }
+            note = `\n  Note: pid ${job.pid} could not be identified on this platform, so no signal was sent.`;
         }
         else {
             try {
@@ -297,7 +303,7 @@ export function cancel(args) {
         const settled = awaitRunnerRecord(job.id);
         // The runner got there first and kept the partial output; leave it alone.
         if (settled && settled.status !== "running") {
-            return `Cancelled job ${job.id} (recorded as ${settled.status})`;
+            return `Cancelled job ${job.id} (recorded as ${settled.status})${note}`;
         }
     }
     // Nothing to signal, or the runner died without recording: record it here,
@@ -307,7 +313,7 @@ export function cancel(args) {
         return `Job ${job.id} is already ${base.status}; nothing to cancel.`;
     }
     saveJob({ ...base, status: "cancelled", finishedAt: new Date().toISOString() });
-    return `Cancelled job ${job.id}`;
+    return `Cancelled job ${job.id}${note}`;
 }
 // --- Main ---
 /**

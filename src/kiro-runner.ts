@@ -27,6 +27,14 @@ if (!jobId || !timeoutArg || !kiroPath) {
   process.exit(2);
 }
 
+// Validated like the rest of argv: an unusable value would reach setTimeout as
+// NaN, which fires at once and reports a timeout that never happened.
+const timeoutMs = Math.floor(Number(timeoutArg));
+if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
+  console.error(`kiro-runner: timeoutMs must be a positive integer, got ${timeoutArg}`);
+  process.exit(2);
+}
+
 /**
  * kiro-cli may leave a descendant holding its stdout open after exiting, and
  * then EOF never arrives. Once the process itself has exited, wait only this
@@ -34,7 +42,6 @@ if (!jobId || !timeoutArg || !kiroPath) {
  */
 const FLUSH_GRACE_MS = 2_000;
 
-const timeoutMs = Number(timeoutArg);
 const maxBytes = maxOutputBytes();
 let timedOut = false;
 let finalized = false;
@@ -131,7 +138,13 @@ child.stderr?.on("data", (d: string) => append(d, Buffer.byteLength(d)));
 
 let settled = false;
 
-function settle(code: number | null, signal: NodeJS.Signals | null): void {
+/**
+ * `viaGrace` means the pipes never reached EOF and we stopped waiting. Something
+ * in the group is still holding stdout open, so it is swept -- as on the
+ * timeout, error and cancel paths -- rather than left running unsupervised
+ * under --trust-all-tools.
+ */
+function settle(code: number | null, signal: NodeJS.Signals | null, viaGrace = false): void {
   if (settled) return;
   settled = true;
   clearTimeout(timer);
@@ -141,10 +154,10 @@ function settle(code: number | null, signal: NodeJS.Signals | null): void {
     return;
   }
   if (signal) {
-    finalize("failed", `${output}\n\nERROR: kiro-cli was terminated by ${signal}.`);
+    finalize("failed", `${output}\n\nERROR: kiro-cli was terminated by ${signal}.`, viaGrace);
     return;
   }
-  finalize(code === 0 ? "completed" : "failed", output);
+  finalize(code === 0 ? "completed" : "failed", output, viaGrace);
 }
 
 let graceTimer: NodeJS.Timeout | undefined;
@@ -152,7 +165,7 @@ let graceTimer: NodeJS.Timeout | undefined;
 // "exit" is the authoritative signal that kiro-cli finished; "close" only tells
 // us the pipes drained, which a lingering descendant can delay indefinitely.
 child.on("exit", (code, signal) => {
-  graceTimer = setTimeout(() => settle(code, signal), FLUSH_GRACE_MS);
+  graceTimer = setTimeout(() => settle(code, signal, true), FLUSH_GRACE_MS);
 });
 
 child.on("close", (code, signal) => {

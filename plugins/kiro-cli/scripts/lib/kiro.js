@@ -48,10 +48,12 @@ function positiveIntEnv(name, fallback) {
     const raw = process.env[name];
     if (!raw)
         return fallback;
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0)
+    // Floor first: flooring after the guard turned any value in (0, 1) into 0,
+    // which zeroed the output cap and made every timeout fire immediately.
+    const n = Math.floor(Number(raw));
+    if (!Number.isFinite(n) || n < 1)
         return fallback;
-    return Math.min(Math.floor(n), MAX_TIMER_MS);
+    return Math.min(n, MAX_TIMER_MS);
 }
 /** Foreground runs block the caller, so they get the shorter budget. */
 export function foregroundTimeoutMs() {
@@ -62,4 +64,12 @@ export function backgroundTimeoutMs() {
 }
 export function maxOutputBytes() {
     return positiveIntEnv("KIRO_PLUGIN_MAX_OUTPUT_BYTES", 10 * 1024 * 1024);
+}
+/** Terminal job records older than this are pruned when a new job starts. */
+export function jobTtlMs() {
+    return positiveIntEnv("KIRO_PLUGIN_JOB_TTL_MS", 7 * 24 * 60 * 60 * 1000);
+}
+/** Upper bound on retained terminal records, whatever their age. */
+export function maxRetainedJobs() {
+    return positiveIntEnv("KIRO_PLUGIN_MAX_JOBS", 50);
 }

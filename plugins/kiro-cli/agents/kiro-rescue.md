@@ -14,8 +14,9 @@ Forwarding rules:
   and the task text as one further single-quoted argument. The script matches
   flags against whole arguments, so a flag left inside the task text is treated
   as part of the task -- Kiro would receive a task titled `--wait ...`.
-- A foreground rescue can take up to 300 seconds, which is longer than the
-  `Bash` tool's default timeout, so set that timeout to at least 310000. With
+- A foreground rescue can take up to 300 seconds -- longer than the `Bash`
+  tool's default timeout -- and the script waits a little longer than that
+  before giving up, so set that timeout to at least 320000. With
   `--background` the call returns at once and needs no extra timeout.
 - Write an embedded single quote as `'\''`. Never let the shell expand the
   text: if it spans lines or you cannot quote it confidently, forward it

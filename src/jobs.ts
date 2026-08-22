@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { jobTtlMs, maxRetainedJobs } from "./kiro.js";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -220,4 +221,34 @@ export function listJobs(): Job[] {
     if (job) jobs.push(reconcile(job));
   }
   return jobs.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+/**
+ * Drops terminal records that are old or simply too numerous. Every run --
+ * foreground included -- leaves a record holding Kiro's full output, so without
+ * this the store grows without bound and every listing pays to parse it.
+ * Running jobs are never touched. Best effort: a job start must not fail
+ * because housekeeping did.
+ */
+export function pruneJobs(): void {
+  let jobs: Job[];
+  try {
+    jobs = listJobs();
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - jobTtlMs();
+  const terminal = jobs.filter((j) => j.status !== "running");
+  const doomed = new Set(
+    terminal.filter((j) => Date.parse(j.finishedAt ?? j.startedAt) < cutoff).map((j) => j.id),
+  );
+  // listJobs is newest-first, so the tail is what falls outside the cap.
+  for (const job of terminal.slice(maxRetainedJobs())) doomed.add(job.id);
+  for (const id of doomed) {
+    try {
+      unlinkSync(join(getJobsDir(), `${id}.json`));
+    } catch {
+      /* already gone, or not ours to remove */
+    }
+  }
 }

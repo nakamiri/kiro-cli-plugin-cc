@@ -712,3 +712,82 @@ test("a foreground run is recorded, so its output survives the caller", () => {
   assert.equal(listed[0].kind, "review");
   assert.equal(listed[0].status, "completed");
 });
+
+// --- Round-9 regressions ---
+
+test("a fractional env value falls back instead of collapsing to zero", () => {
+  const kiro = fakeEchoKiro();
+  // Flooring after the "> 0" guard made 0.5 into 0: no output, instant timeout.
+  const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_OUTPUT_BYTES: "0.5" });
+  assert.match(r.stdout, /^ARG:chat$/m);
+  assert.doesNotMatch(r.stdout, /truncated at 0 bytes/);
+  const r2 = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "0.9" });
+  assert.match(r2.stdout, /^ARG:chat$/m);
+  assert.doesNotMatch(r2.stdout, /timed out after 0ms/);
+});
+
+test("the runner rejects a non-numeric timeout instead of treating it as NaN", () => {
+  const kiro = fakeEchoKiro();
+  const runner = resolve(__dirname, "..", "plugins", "kiro-cli", "scripts", "lib", "kiro-runner.js");
+  const r = spawnSync(process.execPath, [runner, "kiro-x-y", "not-a-number", kiro, "chat"], {
+    encoding: "utf-8",
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir },
+  });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /timeoutMs must be a positive integer/);
+});
+
+test("old terminal records are pruned when a new job starts", async () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  const old = new Date(Date.now() - 60_000).toISOString();
+  writeFileSync(
+    join(jobsDir, "kiro-old-one.json"),
+    JSON.stringify({ id: "kiro-old-one", kind: "review", status: "completed", startedAt: old, finishedAt: old, result: "stale" })
+  );
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000" }).stdout
+  );
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  const ids = readJobs().map((j) => j.id);
+  assert.equal(ids.includes("kiro-old-one"), false, "the stale record survived");
+  assert.ok(ids.includes(jobId));
+});
+
+test("pruning keeps running jobs and respects the retention cap", async () => {
+  const kiro = fakeSlowKiro(6);
+  mkdirSync(jobsDir, { recursive: true });
+  const live = JSON.parse(run(["rescue", "--background", "long"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === live.jobId && typeof j.pid === "number");
+  for (const [n, age] of [["a", 90_000], ["b", 60_000], ["c", 30_000]]) {
+    const ts = new Date(Date.now() - age).toISOString();
+    writeFileSync(
+      join(jobsDir, `kiro-keep-${n}.json`),
+      JSON.stringify({ id: `kiro-keep-${n}`, kind: "review", status: "completed", startedAt: ts, finishedAt: ts, result: "x" })
+    );
+  }
+  const echo = fakeEchoKiro("cap-kiro");
+  run(["review"], { KIRO_CLI_PATH: echo, KIRO_PLUGIN_MAX_JOBS: "1" });
+  const jobs = readJobs();
+  // The in-flight job is untouched by pruning.
+  assert.ok(jobs.some((j) => j.id === live.jobId && j.status === "running"));
+  const terminal = jobs.filter((j) => j.status !== "running");
+  // The cap is applied when a job starts, so it holds over the records that
+  // existed then -- the newest one -- plus the run that has since finished.
+  assert.equal(terminal.length, 2);
+  assert.ok(terminal.some((j) => j.id === "kiro-keep-c"), "the newest retained record was pruned");
+  assert.equal(terminal.some((j) => j.id === "kiro-keep-a" || j.id === "kiro-keep-b"), false);
+  run(["cancel", live.jobId]);
+});
+
+test("a foreground wait ends promptly when its runner dies without recording", async () => {
+  const kiro = fakeSlowKiro(30);
+  // Start in the background so we can kill the runner, then confirm the same
+  // reconciliation a foreground wait relies on notices it without the deadline.
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  process.kill(-job.pid, "SIGKILL");
+  await new Promise((r) => setTimeout(r, 500));
+  const seen = JSON.parse(run(["status", jobId]).stdout);
+  assert.equal(seen.status, "failed");
+});
