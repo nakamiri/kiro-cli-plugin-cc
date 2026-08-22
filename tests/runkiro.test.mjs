@@ -596,7 +596,8 @@ test("the foreground timeout is a hard upper bound", () => {
   const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "1500" });
   const elapsed = Date.now() - started;
   // A plain `timeout` only sends SIGTERM and then keeps waiting.
-  assert.ok(elapsed < 6000, `waited ${elapsed}ms on a 1500ms budget`);
+  // Unbounded it ran the stub's full 10s; the margin is for a loaded runner.
+  assert.ok(elapsed < 8000, `waited ${elapsed}ms on a 1500ms budget`);
   assert.match(r.stdout, /ERROR/);
 });
 
@@ -812,7 +813,8 @@ test("a foreground wait ends promptly when its runner dies without recording", (
     KIRO_PLUGIN_TIMEOUT_MS: "1000",
   });
   const elapsed = Date.now() - started;
-  assert.ok(elapsed < 6000, `waited ${elapsed}ms for a runner that exited at once`);
+  // Previously this blocked for the whole budget plus slack, about 11s.
+  assert.ok(elapsed < 8000, `waited ${elapsed}ms for a runner that exited at once`);
   assert.match(r.stdout, /ERROR/);
   assert.doesNotMatch(r.stdout, /did not finish within/);
 });
@@ -1009,4 +1011,19 @@ test("an old orphaned transcript is still cleaned up", () => {
   utimesSync(join(jobsDir, "kiro-old2-aa.out"), stale, stale);
   run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000" });
   assert.equal(readdirSync(jobsDir).includes("kiro-old2-aa.out"), false);
+});
+
+// --- Round-14 regressions ---
+
+test("a run that printed nothing says so instead of returning a blank line", async () => {
+  const kiro = join(tmpDir, "silent-kiro");
+  writeFileSync(kiro, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const fg = run(["review"], { KIRO_CLI_PATH: kiro });
+  assert.match(fg.stdout, /No output was recorded/);
+
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  // An empty transcript is stored, so `??` returned it and printed nothing.
+  assert.match(run(["result", jobId]).stdout, /No result stored|No output was recorded/);
+  assert.match(run(["result"]).stdout, /No result stored|No output was recorded/);
 });

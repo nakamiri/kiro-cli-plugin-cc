@@ -169,7 +169,7 @@ async function awaitResult(id: string, timeoutMs: number): Promise<string> {
       job = loadJob(id);
     }
     if (job && job.status !== "running") {
-      const body = readJobResult(id) ?? job.note ?? "";
+      const body = readJobResult(id) || job.note || "";
       if (job.status === "completed") return body || "No output was recorded.";
       // Keep whatever Kiro produced -- it may be a complete review -- but do
       // not let a failed run read like a successful one.
@@ -260,12 +260,14 @@ export function result(args: string[]): string {
     const jobs = listJobs().filter((j) => j.status === "completed");
     if (jobs.length === 0) return "No completed jobs found.";
     const latest = jobs[0]!;
-    return readJobResult(latest.id) ?? latest.note ?? "No result stored.";
+    // `||`, not `??`: a run that printed nothing stores an empty transcript,
+    // and returning it verbatim made /kiro-cli:result print a blank line.
+    return readJobResult(latest.id) || latest.note || "No result stored.";
   }
   const job = loadJob(id);
   if (!job) return `No job found with ID: ${id}`;
   if (job.status === "running") return `Job ${id} is still running. Use /kiro-cli:status to check progress.`;
-  return readJobResult(id) ?? job.note ?? "No result stored.";
+  return readJobResult(id) || job.note || "No result stored.";
 }
 
 export function cancel(args: string[]): string {
