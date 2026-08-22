@@ -48,6 +48,12 @@ apostrophe -- "don't break the build" -- unbalances it and the remainder is
 word-split and expanded. The heredoc body is not interpreted at all, so there is
 nothing to get wrong. Never wrap the arguments in a command substitution.
 
+The `--base` ref is the one piece of user input that has to stay on the command
+line, so check it first: it must match `^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$`
+(`main`, `origin/main`, `v1.2.3`, `HEAD~3`). If it does not, run nothing and tell
+the user it is not a usable git ref. The script rejects anything else too, but
+the check belongs before the command line is built, not after.
+
 A foreground review can take up to 300 seconds, and the script waits a little
 longer than that before giving up, so set the `Bash` tool timeout to at least
 320000 for it.

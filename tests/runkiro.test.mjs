@@ -1555,3 +1555,78 @@ test("focus text that already ends in a full stop is not doubled", () => {
   assert.match(r.stdout, /Focus on: check the auth paths\. Provide/);
   assert.doesNotMatch(r.stdout, /paths\.\./);
 });
+
+// --- Round-23 regressions ---
+
+function writeFinishedJob(id, { startedAt, finishedAt, bytes, omitBytes = false }) {
+  const meta = { id, kind: "review", status: "completed", startedAt, finishedAt };
+  if (!omitBytes) meta.resultBytes = bytes;
+  writeFileSync(join(jobsDir, `${id}.json`), JSON.stringify(meta));
+  writeFileSync(join(jobsDir, `${id}.out`), "r".repeat(bytes));
+}
+
+test("pruning keeps the run that finished last, not the one that started last", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // A long job started first and finished last; a short one started later.
+  writeFinishedJob("kiro-plong-aa", {
+    startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:10:00.000Z", bytes: 1000,
+  });
+  writeFinishedJob("kiro-pshort-aa", {
+    startedAt: "2026-01-01T00:05:00.000Z", finishedAt: "2026-01-01T00:06:00.000Z", bytes: 5,
+  });
+  run(["review"], {
+    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOBS: "2",
+    KIRO_PLUGIN_MAX_JOB_BYTES: "100", KIRO_PLUGIN_JOB_TTL_MS: "864000000000",
+  });
+  const left = readdirSync(jobsDir);
+  // Ordering by startedAt deleted the newer result and kept the stale one.
+  assert.ok(left.includes("kiro-plong-aa.json"), "the last-finished run was pruned");
+});
+
+test("a transcript with no recorded size is still charged to the byte budget", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  writeFinishedJob("kiro-nosize1-aa", {
+    startedAt: "2026-01-01T00:02:00.000Z", finishedAt: "2026-01-01T00:02:00.000Z", bytes: 5,
+  });
+  for (const [n, min] of [["2", "01"], ["3", "00"]]) {
+    writeFinishedJob(`kiro-nosize${n}-aa`, {
+      startedAt: `2026-01-01T00:${min}:00.000Z`, finishedAt: `2026-01-01T00:${min}:00.000Z`,
+      bytes: 15_000, omitBytes: true,
+    });
+  }
+  run(["review"], {
+    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "100",
+    KIRO_PLUGIN_MAX_JOBS: "50", KIRO_PLUGIN_JOB_TTL_MS: "864000000000",
+  });
+  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-nosize") && f.endsWith(".out"));
+  // Charged zero, 30 KB of orphaned transcripts sat inside a 100-byte budget.
+  assert.ok(left.length < 3, `nothing was charged: ${left}`);
+});
+
+test("an unsafe --base ref is refused rather than passed through", () => {
+  const kiro = fakeEchoKiro();
+  for (const ref of ["main; echo pwned", "$(id -u)", "a'b", "back`tick`"]) {
+    for (const args of [["review", "--base", ref], ["review", `--base=${ref}`]]) {
+      const r = run(args, { KIRO_CLI_PATH: kiro });
+      assert.match(r.stdout, /not a usable git ref/, `accepted ${ref}`);
+      assert.doesNotMatch(r.stdout, /^ARG:chat$/m);
+    }
+  }
+});
+
+test("ordinary git refs are still accepted", () => {
+  const kiro = fakeEchoKiro();
+  for (const ref of ["main", "origin/main", "v1.2.3", "HEAD~3", "HEAD@{1}", "release/2.x"]) {
+    const r = run(["review", "--base", ref], { KIRO_CLI_PATH: kiro });
+    assert.ok(r.stdout.includes(`Compare against ${ref}.`), `rejected ${ref}: ${r.stdout}`);
+  }
+});
+
+test("a question in the focus text keeps its own punctuation", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "why is auth slow?"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Focus on: why is auth slow\? Provide/);
+  assert.doesNotMatch(r.stdout, /slow\?\./);
+});

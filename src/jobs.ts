@@ -357,6 +357,25 @@ function removeJobFiles(dir: string, id: string): void {
   }
 }
 
+export function finishedTime(job: Job): number {
+  const t = Date.parse(job.finishedAt ?? job.startedAt);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * A transcript's size. resultBytes is written with the record, so a transcript
+ * left behind by a runner that died between the two writes has none -- and
+ * charging it zero let arbitrarily large orphans sit inside the byte budget.
+ */
+function transcriptBytes(dir: string, job: Job): number {
+  if (job.resultBytes !== undefined) return job.resultBytes;
+  try {
+    return statSync(join(dir, `${job.id}${OUT_EXT}`)).size;
+  } catch {
+    return 0;
+  }
+}
+
 function ageOf(dir: string, name: string): number {
   try {
     return Date.now() - statSync(join(dir, name)).mtimeMs;
@@ -467,12 +486,16 @@ export function pruneJobs(): void {
     else terminal.push(job);
   }
 
-  terminal.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  // By finish time, which is how `result` picks the latest run. Ordering by
+  // startedAt instead meant that with two overlapping background jobs the caps
+  // deleted the one that finished last, and `result` then quietly returned an
+  // older transcript.
+  terminal.sort((a, b) => finishedTime(b) - finishedTime(a));
 
   const cutoff = Date.now() - ttl;
   const doomed = new Set<string>();
   for (const job of terminal) {
-    if (Date.parse(job.finishedAt ?? job.startedAt) < cutoff) doomed.add(job.id);
+    if (finishedTime(job) < cutoff) doomed.add(job.id);
   }
   // Newest-first, so the tail is what falls outside the count cap.
   for (const job of terminal.slice(maxRetainedJobs())) doomed.add(job.id);
@@ -496,7 +519,7 @@ export function pruneJobs(): void {
       keptAny = true;
       continue;
     }
-    kept += job.resultBytes ?? 0;
+    kept += transcriptBytes(dir, job);
     if (kept > byteBudget) doomed.add(job.id);
   }
 

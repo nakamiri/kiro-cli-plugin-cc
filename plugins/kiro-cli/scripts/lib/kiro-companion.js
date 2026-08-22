@@ -15,11 +15,29 @@ function genId() {
  * happens to read like an option -- or a `--base` with no ref of its own -- can
  * neither be parsed as one nor swallow the text as its argument.
  */
+/**
+ * Refs that are safe to put on a shell command line: no quotes, no `$`, no
+ * backticks, no whitespace, no separators. Wide enough for real revisions
+ * (`origin/main`, `v1.2.3`, `HEAD~3`, `HEAD@{1}`), narrow enough that quoting
+ * one cannot go wrong. The commands are told to check this before building the
+ * command line; enforcing it here makes the contract more than advice.
+ */
+const SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$/;
+export function isSafeRef(ref) {
+    return SAFE_REF_RE.test(ref);
+}
+function requireSafeRef(ref) {
+    if (isSafeRef(ref))
+        return ref;
+    throw new InvalidArgument(`${ref} is not a usable git ref. Use letters, digits and . _ / @ ^ ~ { } - only.`);
+}
 export function splitArgs(args) {
     const sep = args.indexOf("--");
     if (sep === -1)
         return { flags: args, literal: "" };
     return { flags: args.slice(0, sep), literal: args.slice(sep + 1).join(" ") };
+}
+export class InvalidArgument extends Error {
 }
 export function buildReviewPrompt(rawArgs) {
     const { flags: args, literal } = splitArgs(rawArgs);
@@ -34,7 +52,7 @@ export function buildReviewPrompt(rawArgs) {
         if (a.startsWith("--base=")) {
             const value = a.slice("--base=".length);
             if (value !== "")
-                base = value;
+                base = requireSafeRef(value);
             continue;
         }
         if (a === "--base") {
@@ -43,7 +61,7 @@ export function buildReviewPrompt(rawArgs) {
             // used to make "--background" the ref, and "--base ''" produced the
             // prompt "Compare against ." instead of falling back to HEAD.
             if (next !== undefined && next !== "" && !next.startsWith("-")) {
-                base = next;
+                base = requireSafeRef(next);
                 i++;
             }
             continue;
@@ -52,10 +70,11 @@ export function buildReviewPrompt(rawArgs) {
     }
     const extra = [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
     let prompt = `Review the code changes. Compare against ${base}.`;
-    // Terminated: without the full stop the focus text ran straight into the
-    // next sentence of the prompt.
+    // Terminated, so the focus text does not run into the next sentence of the
+    // prompt -- but only when it does not already end a sentence itself, or
+    // "why is auth slow?" became "why is auth slow?.".
     if (extra)
-        prompt += ` Focus on: ${extra.replace(/[.\s]+$/, "")}.`;
+        prompt += /[.!?:;]$/.test(extra) ? ` Focus on: ${extra}` : ` Focus on: ${extra}.`;
     prompt += " Provide a thorough code review covering correctness, security, performance, and style.";
     return prompt;
 }
