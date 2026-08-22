@@ -1330,3 +1330,83 @@ test("an overflowing numeric setting is clamped rather than ignored", () => {
   const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "1e400" });
   assert.match(r.stdout, /^ARG:chat$/m);
 });
+
+// --- Round-19 regressions ---
+
+test("rescue with no task refuses instead of inventing one", () => {
+  const kiro = fakeEchoKiro();
+  for (const args of [["rescue"], ["rescue", "--background"], ["rescue", "--wait"]]) {
+    const r = run(args, { KIRO_CLI_PATH: kiro });
+    // It used to run "Investigate and fix the current issue." under
+    // --trust-all-tools -- a fabricated task against a writable repository.
+    assert.match(r.stdout, /ERROR: no task was given/);
+    assert.doesNotMatch(r.stdout, /Investigate and fix the current issue/);
+    assert.doesNotMatch(r.stdout, /^ARG:chat$/m);
+  }
+});
+
+test("rescue with an empty stdin body refuses too", () => {
+  const kiro = fakeEchoKiro();
+  const r = runWithStdin(["rescue"], "", { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /ERROR: no task was given/);
+  assert.doesNotMatch(r.stdout, /Investigate and fix the current issue/);
+});
+
+test("review with no arguments still works", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against HEAD\./);
+});
+
+test("stdin input is not lost when the writer stalls part way through", () => {
+  const kiro = fakeEchoKiro();
+  const runner = spawn(process.execPath, [COMPANION, "rescue", "--args-stdin"], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir, KIRO_CLI_PATH: kiro },
+  });
+  let out = "";
+  runner.stdout.setEncoding("utf-8");
+  runner.stdout.on("data", (d) => { out += d; });
+  // Three chunks, each gap inside the per-stall budget but adding up to more
+  // than it. The budget used to cover the whole read, so everything already
+  // received was discarded once the total passed it.
+  runner.stdin.write("one ");
+  return new Promise((resolve, reject) => {
+    setTimeout(() => runner.stdin.write("two "), 3000);
+    setTimeout(() => {
+      runner.stdin.write("three\n");
+      runner.stdin.end();
+    }, 6000);
+    runner.on("close", () => {
+      try {
+        assert.match(out, /ARG:one two three/);
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+});
+
+test("a legacy shared jobs directory is tightened and drained", () => {
+  if (process.getuid === undefined) return;
+  const home = join(tmpDir, "legacyhome");
+  const legacy = join(home, "kiro-plugin-cc-jobs");
+  mkdirSync(legacy, { recursive: true, mode: 0o755 });
+  writeFileSync(join(legacy, "kiro-oldrec-aa.json"), "{}", { mode: 0o644 });
+  writeFileSync(join(legacy, "keep-me.txt"), "not ours");
+  const stale = new Date(Date.now() - 120_000);
+  for (const f of readdirSync(legacy)) utimesSync(join(legacy, f), stale, stale);
+
+  const kiro = fakeEchoKiro();
+  const r = spawnSync(process.execPath, [COMPANION, "review"], {
+    encoding: "utf-8",
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home, KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000" },
+  });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  // The suffix change orphaned any pre-upgrade store at the old shared path,
+  // world-readable and unreachable.
+  assert.equal(statSync(legacy).mode & 0o077, 0, "still world-readable");
+  assert.equal(readdirSync(legacy).includes("kiro-oldrec-aa.json"), false, "record not drained");
+  assert.ok(readdirSync(legacy).includes("keep-me.txt"), "a foreign file was deleted");
+});

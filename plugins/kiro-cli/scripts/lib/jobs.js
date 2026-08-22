@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { jobTtlMs, maxRetainedJobBytes, maxRetainedJobs } from "./kiro.js";
@@ -319,7 +319,64 @@ function ageOf(dir, name) {
  * strictly alone. Best effort throughout -- housekeeping must not be able to
  * fail a job.
  */
+/**
+ * The default jobs directory gained a per-user suffix, which left any
+ * pre-upgrade store behind at the old shared path -- still holding transcripts,
+ * and created with the default mode, so world-readable. Nothing reads it any
+ * more, so tighten it, let its contents age out under the same rules as the
+ * current store, and remove it once empty. Only files this plugin could have
+ * generated are touched, and only ones we own.
+ */
+function drainLegacyJobsDir() {
+    if (process.env.KIRO_PLUGIN_JOBS_DIR)
+        return;
+    const uid = process.getuid?.();
+    if (uid === undefined)
+        return;
+    const legacy = join(tmpdir(), "kiro-plugin-cc-jobs");
+    try {
+        if (lstatSync(legacy).isSymbolicLink())
+            return;
+        const st = statSync(legacy);
+        if (!st.isDirectory() || st.uid !== uid)
+            return;
+        if ((st.mode & 0o077) !== 0)
+            chmodSync(legacy, 0o700);
+    }
+    catch {
+        return; // not there, or not ours to touch
+    }
+    const ttl = jobTtlMs();
+    let names;
+    try {
+        names = readdirSync(legacy);
+    }
+    catch {
+        return;
+    }
+    for (const name of names) {
+        const isOurs = TMP_RE.test(name) ||
+            (name.endsWith(META_EXT) && GENERATED_ID_RE.test(name.slice(0, -META_EXT.length))) ||
+            (name.endsWith(OUT_EXT) && GENERATED_ID_RE.test(name.slice(0, -OUT_EXT.length)));
+        if (!isOurs)
+            continue;
+        if (ageOf(legacy, name) <= ttl)
+            continue;
+        try {
+            unlinkSync(join(legacy, name));
+        }
+        catch { /* best effort */ }
+    }
+    try {
+        if (readdirSync(legacy).length === 0)
+            rmdirSync(legacy);
+    }
+    catch {
+        /* still has files, or gone already */
+    }
+}
 export function pruneJobs() {
+    drainLegacyJobsDir();
     let dir;
     let names;
     try {

@@ -57,11 +57,11 @@ export function buildReviewPrompt(rawArgs) {
     prompt += " Provide a thorough code review covering correctness, security, performance, and style.";
     return prompt;
 }
+/** The task text, or "" when none was given. Never a substitute for one. */
 export function buildRescuePrompt(rawArgs) {
     const { flags, literal } = splitArgs(rawArgs);
     const filtered = flags.filter((a) => !["--background", "--wait"].includes(a));
-    const task = [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
-    return task || "Investigate and fix the current issue.";
+    return [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
 }
 export function hasFlag(args, flag) {
     // Only before the `--`: literal text that happens to read like a flag is not one.
@@ -270,8 +270,15 @@ export function setup(args) {
 export function review(args) {
     return runKiro("review", buildReviewPrompt(args), wantsBackground(args));
 }
-export function rescue(args) {
-    return runKiro("rescue", buildRescuePrompt(args), wantsBackground(args));
+export async function rescue(args) {
+    const task = buildRescuePrompt(args);
+    if (task === "") {
+        // It used to fall back to "Investigate and fix the current issue." and hand
+        // that to Kiro under --trust-all-tools: a fabricated task, with the
+        // repository writable, standing in for one the user never gave.
+        return "ERROR: no task was given. Say what Kiro should investigate or fix.";
+    }
+    return runKiro("rescue", task, wantsBackground(args));
 }
 export function status(args) {
     const id = args[0];
@@ -443,7 +450,9 @@ const STDIN_EAGAIN_BUDGET_MS = 5_000;
 function readAllStdin() {
     const chunks = [];
     const buf = Buffer.alloc(64 * 1024);
-    const deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
+    // Budgets the current stall, not the whole read: a writer that pauses part way
+    // through a long body would otherwise lose everything already received.
+    let deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
     for (;;) {
         let n;
         try {
@@ -465,6 +474,7 @@ function readAllStdin() {
         if (n === 0)
             break;
         chunks.push(Buffer.from(buf.subarray(0, n)));
+        deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
     }
     return Buffer.concat(chunks).toString("utf-8");
 }

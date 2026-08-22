@@ -129,7 +129,8 @@ gigabytes; `/kiro-cli:result` is what reads a transcript.
 
 ### `/kiro-cli:rescue`
 
-Hands a task to Kiro CLI.
+Hands a task to Kiro CLI. A task is required -- with none given the command
+reports an error rather than inventing one.
 
 ```
 /kiro-cli:rescue investigate why the tests are failing

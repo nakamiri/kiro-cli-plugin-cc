@@ -43,6 +43,14 @@ let finalized = false;
 let bytes = 0;
 let truncated = false;
 const chunks = [];
+const streamErrors = [];
+/** The captured output, with any stream diagnostics appended verbatim. */
+function collected() {
+    const body = chunks.join("");
+    if (streamErrors.length === 0)
+        return body;
+    return `${body}\n\n[${streamErrors.join("; ")}]`;
+}
 function append(text, byteLength) {
     if (truncated)
         return;
@@ -146,15 +154,18 @@ child.stdout?.on("data", (d) => append(d, Buffer.byteLength(d)));
 child.stderr?.on("data", (d) => append(d, Buffer.byteLength(d)));
 // A stream error would otherwise be an unhandled 'error' event, and this
 // process must not die without tearing its group down.
-child.stdout?.on("error", (err) => { append(`\n[stdout error: ${err.message}]\n`, 0); });
-child.stderr?.on("error", (err) => { append(`\n[stderr error: ${err.message}]\n`, 0); });
+// Kept out of the capped body: charged at zero bytes they escaped the budget,
+// and once truncation had begun they were dropped altogether, so a job could
+// report success while hiding that output had been lost.
+child.stdout?.on("error", (err) => { streamErrors.push(`stdout error: ${err.message}`); });
+child.stderr?.on("error", (err) => { streamErrors.push(`stderr error: ${err.message}`); });
 let settled = false;
 function settle(code, signal) {
     if (settled)
         return;
     settled = true;
     clearTimeout(timer);
-    const output = chunks.join("");
+    const output = collected();
     if (timedOut) {
         finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`);
         return;
@@ -187,7 +198,7 @@ child.on("error", (err) => {
     settled = true;
     // An error can also arrive after a successful spawn (for instance EPERM from
     // the timeout kill), so keep whatever kiro produced and sweep the group.
-    const output = chunks.join("");
+    const output = collected();
     const detail = `ERROR: could not run kiro-cli: ${err.message}`;
     finalize("failed", output ? `${output}\n\n${detail}` : detail);
 });
@@ -199,7 +210,7 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
         if (graceTimer)
             clearTimeout(graceTimer);
         settled = true;
-        finalize("cancelled", `${chunks.join("")}\n\n[cancelled]`);
+        finalize("cancelled", `${collected()}\n\n[cancelled]`);
     });
 }
 /**
@@ -212,7 +223,7 @@ function bailOut(what, err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`kiro-runner: ${what}: ${message}`);
     try {
-        finalize("failed", `${chunks.join("")}\n\nERROR: the Kiro supervisor failed (${what}): ${message}`);
+        finalize("failed", `${collected()}\n\nERROR: the Kiro supervisor failed (${what}): ${message}`);
     }
     catch {
         sweepGroup();

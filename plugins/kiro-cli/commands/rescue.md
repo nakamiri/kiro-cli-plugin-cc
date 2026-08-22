@@ -18,4 +18,6 @@ Operating rules:
 - The subagent forwards to `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue ...`.
 - Return the Kiro output verbatim to the user.
 - Do not paraphrase, summarize, or add commentary.
-- If the user did not supply a request, ask what Kiro should investigate or fix.
+- If the user did not supply a request, ask what Kiro should investigate or
+  fix. Do not invent one: the script refuses an empty task rather than
+  handing Kiro something made up with the repository writable.

@@ -40,14 +40,14 @@ test("buildRescuePrompt: strips execution flags", () => {
   assert.equal(p, "investigate the bug");
 });
 
-test("buildRescuePrompt: returns default when no task given", () => {
-  const p = buildRescuePrompt([]);
-  assert.equal(p, "Investigate and fix the current issue.");
+test("buildRescuePrompt: returns nothing when no task given", () => {
+  // It used to substitute a generic task, which the rescue command would then
+  // hand to Kiro with the repository writable.
+  assert.equal(buildRescuePrompt([]), "");
 });
 
-test("buildRescuePrompt: returns default when only flags given", () => {
-  const p = buildRescuePrompt(["--background", "--wait"]);
-  assert.equal(p, "Investigate and fix the current issue.");
+test("buildRescuePrompt: returns nothing when only flags given", () => {
+  assert.equal(buildRescuePrompt(["--background", "--wait"]), "");
 });
 
 test("hasFlag: detects presence of flag", () => {
