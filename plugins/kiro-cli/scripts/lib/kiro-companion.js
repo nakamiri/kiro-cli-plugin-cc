@@ -1,9 +1,9 @@
 import { execFileSync, spawn } from "node:child_process";
 import { readSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob } from "./jobs.js";
+import { classifyPid, isPidAlive, listJobs, loadJob, loadJobRaw, pruneJobs, readJobResult, saveJob } from "./jobs.js";
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
-export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
+export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
 export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
 function genId() {
@@ -363,18 +363,22 @@ export function cancel(args) {
     let signalled = false;
     let signalError = "";
     if (isPidAlive(job.pid)) {
-        // reconcile() rejects a pid that demonstrably belongs to something else, so
-        // a recycled pid never reaches here -- but it treats an unreadable command
-        // line as a match, because refusing on that basis would fail every healthy
-        // job. That leaves identity unproven, and an unproven pid is not something
-        // to send a signal to, let alone signal a whole group of.
-        if (pidCommandLine(job.pid) === null) {
+        // Classified afresh rather than trusting the verdict reconcile reached: only
+        // "ours" may be signalled. Reconciliation accepts "unknown" because it must,
+        // and the probe can be flaky under load, so a recycled pid that slipped
+        // through there would otherwise have its whole process group signalled here.
+        const verdict = classifyPid(job.pid, job.id);
+        if (verdict === "unknown") {
             // Signalling an unidentifiable pid could hit anything, but recording a
             // cancellation we did not perform is worse: Kiro would keep working under
             // --trust-all-tools while the user was told it had stopped, and its
             // result would be discarded when the runner found a terminal record.
             return (`Could not cancel job ${job.id}: its runner (pid ${job.pid}) cannot be identified on ` +
                 `this platform, so no signal was sent and the job is still running.`);
+        }
+        else if (verdict === "foreign") {
+            return (`Could not cancel job ${job.id}: pid ${job.pid} now belongs to another process, ` +
+                `so no signal was sent.`);
         }
         else {
             try {

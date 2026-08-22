@@ -1470,3 +1470,53 @@ test("setup does not let kiro-cli's stderr into its own output", () => {
   assert.equal(info.version, "kiro-cli 3.2.1");
   assert.equal(info.runnable, true);
 });
+
+// --- Round-21 regressions ---
+
+test("the byte budget never deletes the run that just finished", async () => {
+  const kiro = join(tmpDir, "chatty-big-kiro");
+  writeFileSync(kiro, `#!${process.execPath}\nprocess.stdout.write("w".repeat(5000));\n`, { mode: 0o755 });
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000" }).stdout
+  );
+  await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  assert.match(run(["result", jobId]).stdout, /w{100}/);
+
+  // pruneJobs runs at every job start, and the byte pass had no floor: a
+  // transcript larger than the budget was deleted before anyone read it.
+  const echo = fakeEchoKiro("nudge-kiro");
+  run(["review"], { KIRO_CLI_PATH: echo, KIRO_PLUGIN_MAX_JOB_BYTES: "1000" });
+  const out = run(["result", jobId]).stdout;
+  assert.doesNotMatch(out, /No job found|No result stored/);
+  assert.match(out, /w{100}/);
+});
+
+test("the byte budget still trims older runs", async () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  for (const [n, age] of [["a", 9000], ["b", 6000], ["c", 3000]]) {
+    const ts = new Date(Date.now() - age).toISOString();
+    writeFileSync(join(jobsDir, `kiro-trim${n}-aa.json`), JSON.stringify({
+      id: `kiro-trim${n}-aa`, kind: "review", status: "completed",
+      startedAt: ts, finishedAt: ts, resultBytes: 900,
+    }));
+    writeFileSync(join(jobsDir, `kiro-trim${n}-aa.out`), "q".repeat(900));
+  }
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_MAX_JOBS: "50" });
+  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-trim") && f.endsWith(".json"));
+  assert.ok(left.length < 3, `nothing was trimmed: ${left}`);
+  assert.ok(left.includes("kiro-trimc-aa.json"), "the newest was trimmed instead of the oldest");
+});
+
+test("cancel refuses a pid that the probe reports as another process", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // A live pid that is plainly not this job's runner. reconcile normally
+  // catches it; cancel must reach the same verdict on its own.
+  writeFileSync(join(jobsDir, "kiro-recyc2-aa.json"), JSON.stringify({
+    id: "kiro-recyc2-aa", kind: "review", status: "running",
+    startedAt: new Date().toISOString(), pid: 1,
+  }));
+  const r = run(["cancel", "kiro-recyc2-aa"]);
+  assert.doesNotMatch(r.stdout, /^Cancelled job/);
+  assert.equal(process.kill(1, 0), true, "pid 1 was signalled");
+});

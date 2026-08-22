@@ -266,16 +266,27 @@ export function pidCommandLine(pid: number): string | null {
 }
 
 /**
- * Whether `pid` is the runner this job started. A live pid proves nothing on
- * its own: pids are reused, and a record that outlives a reboot will routinely
- * point at somebody else's process. A command line that cannot be read at all
- * is treated as a match, because refusing on that basis would report every
- * healthy job as failed on a platform without /proc or ps.
+ * What a live pid actually is. A live pid proves nothing on its own: pids are
+ * reused, and a record that outlives a reboot will routinely point at somebody
+ * else's process.
+ *
+ * "unknown" -- the command line could not be read at all -- is a third answer
+ * on purpose. Reconciliation has to accept it, or every healthy job on a
+ * platform without /proc or ps would read as failed; signalling must not, since
+ * an unproven pid is not something to send a signal to, let alone a whole
+ * process group. The probe can also be flaky under load, so both decisions are
+ * made from a fresh classification rather than assuming the other one held.
  */
-export function isOurRunner(pid: number, jobId: string): boolean {
+export type PidVerdict = "ours" | "foreign" | "unknown";
+
+export function classifyPid(pid: number, jobId: string): PidVerdict {
   const cmd = pidCommandLine(pid);
-  if (cmd === null) return true;
-  return cmd.includes("kiro-runner") && cmd.includes(jobId);
+  if (cmd === null) return "unknown";
+  return cmd.includes("kiro-runner") && cmd.includes(jobId) ? "ours" : "foreign";
+}
+
+export function isOurRunner(pid: number, jobId: string): boolean {
+  return classifyPid(pid, jobId) !== "foreign";
 }
 
 /** How long a record may claim "running" without ever having recorded a pid. */
@@ -471,9 +482,18 @@ export function pruneJobs(): void {
   // dooming once the budget is exceeded keeps the most recent runs.
   const byteBudget = maxRetainedJobBytes();
   let kept = 0;
+  let keptAny = false;
   for (const job of terminal) {
     if (doomed.has(job.id)) continue;
     kept += job.resultBytes ?? 0;
+    // The newest survivor is always retained, however large. The count cap has
+    // this floor for free (its minimum is one); without it here, raising
+    // KIRO_PLUGIN_MAX_OUTPUT_BYTES above the byte budget meant the next job
+    // start deleted the run just finished, before anyone had read it.
+    if (!keptAny) {
+      keptAny = true;
+      continue;
+    }
     if (kept > byteBudget) doomed.add(job.id);
   }
 
