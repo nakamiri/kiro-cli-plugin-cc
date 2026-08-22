@@ -163,6 +163,10 @@ let graceTimer;
 // "exit" is the authoritative signal that kiro-cli finished; "close" only tells
 // us the pipes drained, which a lingering descendant can delay indefinitely.
 child.on("exit", (code, signal) => {
+    // Clear it here, not just in settle(): the grace timer delays settle() by up
+    // to FLUSH_GRACE_MS, and a timeout expiring inside that window would relabel
+    // an already-successful run as a timeout and sweep the group uninvited.
+    clearTimeout(timer);
     graceTimer = setTimeout(() => settle(code, signal, true), FLUSH_GRACE_MS);
 });
 child.on("close", (code, signal) => {

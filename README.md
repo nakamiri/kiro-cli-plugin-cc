@@ -42,8 +42,8 @@ than silently granting it.
 | `KIRO_CLI_PATH` | resolved via `which kiro-cli` | Explicit path to the `kiro-cli` binary |
 | `KIRO_PLUGIN_TRUST_ALL_TOOLS` | enabled when unset | Once set, only `1`/`true`/`yes`/`on` keeps `--trust-all-tools`; anything else drops it |
 | `KIRO_PLUGIN_JOBS_DIR` | `$TMPDIR/kiro-plugin-cc-jobs-<uid>` (mode 0700) | Where background job records are stored |
-| `KIRO_PLUGIN_TIMEOUT_MS` | `300000` | Timeout for foreground runs |
-| `KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS` | `1800000` | Timeout for background jobs |
+| `KIRO_PLUGIN_TIMEOUT_MS` | `300000` | Timeout for foreground runs (capped at 2147483647) |
+| `KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS` | `1800000` | Timeout for background jobs (capped at 2147483647) |
 | `KIRO_PLUGIN_MAX_OUTPUT_BYTES` | `10485760` | Cap on captured Kiro output |
 | `KIRO_PLUGIN_NODE` | the running `node` | Node binary used to launch a job's supervisor |
 | `KIRO_PLUGIN_JOB_TTL_MS` | `604800000` | Age at which a finished job record is pruned |

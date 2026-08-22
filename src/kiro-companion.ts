@@ -276,7 +276,6 @@ export function cancel(args: string[]): string {
     return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
   }
   let signalled = false;
-  let note = "";
   if (job.pid !== undefined && isPidAlive(job.pid)) {
     // reconcile() rejects a pid that demonstrably belongs to something else, so
     // a recycled pid never reaches here -- but it treats an unreadable command
@@ -284,7 +283,14 @@ export function cancel(args: string[]): string {
     // job. That leaves identity unproven, and an unproven pid is not something
     // to send a signal to, let alone signal a whole group of.
     if (pidCommandLine(job.pid) === null) {
-      note = `\n  Note: pid ${job.pid} could not be identified on this platform, so no signal was sent.`;
+      // Signalling an unidentifiable pid could hit anything, but recording a
+      // cancellation we did not perform is worse: Kiro would keep working under
+      // --trust-all-tools while the user was told it had stopped, and its
+      // result would be discarded when the runner found a terminal record.
+      return (
+        `Could not cancel job ${job.id}: its runner (pid ${job.pid}) cannot be identified on ` +
+        `this platform, so no signal was sent and the job is still running.`
+      );
     } else {
       try {
         // Negated pid: the runner leads the group, so kiro-cli stops with it.
@@ -300,7 +306,7 @@ export function cancel(args: string[]): string {
     const settled = awaitRunnerRecord(job.id);
     // The runner got there first and kept the partial output; leave it alone.
     if (settled && settled.status !== "running") {
-      return `Cancelled job ${job.id} (recorded as ${settled.status})${note}`;
+      return `Cancelled job ${job.id} (recorded as ${settled.status})`;
     }
   }
   // Nothing to signal, or the runner died without recording: record it here,
@@ -310,7 +316,7 @@ export function cancel(args: string[]): string {
     return `Job ${job.id} is already ${base.status}; nothing to cancel.`;
   }
   saveJob({ ...base, status: "cancelled", finishedAt: new Date().toISOString() });
-  return `Cancelled job ${job.id}${note}`;
+  return `Cancelled job ${job.id}`;
 }
 
 // --- Main ---

@@ -791,3 +791,41 @@ test("a foreground wait ends promptly when its runner dies without recording", a
   const seen = JSON.parse(run(["status", jobId]).stdout);
   assert.equal(seen.status, "failed");
 });
+
+// --- Round-10 regressions ---
+
+test("a timeout expiring during the flush grace window does not fail a finished run", async () => {
+  const kiro = join(tmpDir, "quick-leaky-kiro");
+  // Exits 0 almost at once but leaves a descendant holding stdout, so settle()
+  // is delayed by the grace timer -- the window the timeout used to fire in.
+  writeFileSync(kiro, '#!/bin/sh\necho "the review"\nsleep 10 &\nexit 0\n', { mode: 0o755 });
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: "900" }).stdout
+  );
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
+  assert.equal(job.status, "completed");
+  assert.doesNotMatch(job.result, /timed out/);
+  assert.match(job.result, /the review/);
+});
+
+test("the same run in the foreground is not reported as a timeout either", () => {
+  const kiro = join(tmpDir, "quick-leaky-fg-kiro");
+  writeFileSync(kiro, '#!/bin/sh\necho "the review"\nsleep 10 &\nexit 0\n', { mode: 0o755 });
+  const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "900" });
+  assert.match(r.stdout, /the review/);
+  assert.doesNotMatch(r.stdout, /timed out/);
+  assert.doesNotMatch(r.stdout, /did not complete/);
+});
+
+test("a retention age longer than the timer ceiling is honoured", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // 30 days: under the old shared clamp this became 24.8 days and pruned it.
+  const ts = new Date(Date.now() - 26 * 24 * 60 * 60 * 1000).toISOString();
+  writeFileSync(
+    join(jobsDir, "kiro-aged-one.json"),
+    JSON.stringify({ id: "kiro-aged-one", kind: "review", status: "completed", startedAt: ts, finishedAt: ts, result: "x" })
+  );
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "2592000000" });
+  assert.ok(readJobs().some((j) => j.id === "kiro-aged-one"), "a 26-day-old record was pruned under a 30-day TTL");
+});

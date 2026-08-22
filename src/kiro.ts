@@ -45,30 +45,36 @@ export function findKiro(): string | null {
 /** setTimeout stores its delay in a signed 32-bit int and silently wraps past this. */
 const MAX_TIMER_MS = 2_147_483_647;
 
-function positiveIntEnv(name: string, fallback: number): number {
+function positiveIntEnv(name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
   const raw = process.env[name];
   if (!raw) return fallback;
   // Floor first: flooring after the guard turned any value in (0, 1) into 0,
   // which zeroed the output cap and made every timeout fire immediately.
   const n = Math.floor(Number(raw));
   if (!Number.isFinite(n) || n < 1) return fallback;
-  return Math.min(n, MAX_TIMER_MS);
+  return Math.min(n, max);
 }
 
 /** Foreground runs block the caller, so they get the shorter budget. */
 export function foregroundTimeoutMs(): number {
-  return positiveIntEnv("KIRO_PLUGIN_TIMEOUT_MS", 300_000);
+  // Clamped: this value becomes a setTimeout delay.
+  return positiveIntEnv("KIRO_PLUGIN_TIMEOUT_MS", 300_000, MAX_TIMER_MS);
 }
 
 export function backgroundTimeoutMs(): number {
-  return positiveIntEnv("KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS", 1_800_000);
+  return positiveIntEnv("KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS", 1_800_000, MAX_TIMER_MS);
 }
 
 export function maxOutputBytes(): number {
   return positiveIntEnv("KIRO_PLUGIN_MAX_OUTPUT_BYTES", 10 * 1024 * 1024);
 }
 
-/** Terminal job records older than this are pruned when a new job starts. */
+/**
+ * Terminal job records older than this are pruned when a new job starts. It is
+ * compared against a timestamp, never used as a timer delay, so the setTimeout
+ * ceiling does not apply -- it used to, silently capping any retention longer
+ * than about 24.8 days.
+ */
 export function jobTtlMs(): number {
   return positiveIntEnv("KIRO_PLUGIN_JOB_TTL_MS", 7 * 24 * 60 * 60 * 1000);
 }
