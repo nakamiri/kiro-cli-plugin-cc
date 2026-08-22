@@ -1,8 +1,8 @@
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, saveJob } from "./jobs.js";
+import { isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob } from "./jobs.js";
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
-export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, saveJob } from "./jobs.js";
+export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
 export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
 function genId() {
@@ -87,7 +87,7 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
                 ...job,
                 status: "failed",
                 finishedAt: new Date().toISOString(),
-                result: `ERROR: could not start the Kiro runner: ${err.message}`,
+                note: `ERROR: could not start the Kiro runner: ${err.message}`,
             });
         }
         catch {
@@ -97,7 +97,7 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
     child.unref();
     if (child.pid === undefined) {
         const detail = "ERROR: could not spawn the Kiro runner process.";
-        saveJob({ ...job, status: "failed", finishedAt: new Date().toISOString(), result: detail });
+        saveJob({ ...job, status: "failed", finishedAt: new Date().toISOString(), note: detail });
         return detail;
     }
     // The runner is its own process group leader, so cancel can signal the group.
@@ -137,16 +137,25 @@ function sleep(ms) {
  */
 async function awaitResult(id, timeoutMs) {
     const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
+    let seen = false;
     for (;;) {
         // Raw: the reconciling read runs a full identity probe, which forks ps on
         // every platform without /proc -- around 1500 times over a long review.
         // A dead runner is caught by the cheap liveness check below instead.
         let job = loadJobRaw(id);
+        if (job)
+            seen = true;
+        else if (seen) {
+            // It was there and now it is not -- pruning from a concurrent job start,
+            // or somebody clearing the store. Waiting out the budget and calling it a
+            // timeout would be a lie, and would throw away a run that had finished.
+            return `ERROR: the record for job ${id} disappeared while waiting for it; its output is not available.`;
+        }
         if (job && job.status === "running" && job.pid !== undefined && !isPidAlive(job.pid)) {
             job = loadJob(id);
         }
         if (job && job.status !== "running") {
-            const body = job.result ?? "";
+            const body = readJobResult(id) ?? job.note ?? "";
             if (job.status === "completed")
                 return body || "No output was recorded.";
             // Keep whatever Kiro produced -- it may be a complete review -- but do
@@ -218,35 +227,20 @@ export function review(args) {
 export function rescue(args) {
     return runKiro("rescue", buildRescuePrompt(args), hasFlag(args, "--background"));
 }
-/**
- * Status is about progress, not output. A recorded result can be megabytes, and
- * ten of them would go straight into the conversation, so large bodies are
- * reported by size and left to /kiro-cli:result. Short ones stay inline: a
- * failure explanation is usually a single line, and hiding it behind another
- * command would be worse than useless.
- */
-const STATUS_INLINE_RESULT_BYTES = 2_000;
-function summarize(job) {
-    if (job.result === undefined)
-        return { ...job };
-    const resultBytes = Buffer.byteLength(job.result);
-    if (resultBytes <= STATUS_INLINE_RESULT_BYTES)
-        return { ...job, resultBytes };
-    const { result, ...rest } = job;
-    return { ...rest, resultBytes };
-}
 export function status(args) {
     const id = args[0];
     if (id) {
         const job = loadJob(id);
         if (!job)
             return `No job found with ID: ${id}`;
-        return JSON.stringify(summarize(job), null, 2);
+        return JSON.stringify(job, null, 2);
     }
     const jobs = listJobs();
     if (jobs.length === 0)
         return "No Kiro jobs found.";
-    return JSON.stringify(jobs.slice(0, 10).map(summarize), null, 2);
+    // Records carry only metadata and a short note, so this stays small however
+    // large the transcripts behind them are. /kiro-cli:result hands those over.
+    return JSON.stringify(jobs.slice(0, 10), null, 2);
 }
 export function result(args) {
     const id = args[0];
@@ -254,14 +248,15 @@ export function result(args) {
         const jobs = listJobs().filter((j) => j.status === "completed");
         if (jobs.length === 0)
             return "No completed jobs found.";
-        return jobs[0].result ?? "No result stored.";
+        const latest = jobs[0];
+        return readJobResult(latest.id) ?? latest.note ?? "No result stored.";
     }
     const job = loadJob(id);
     if (!job)
         return `No job found with ID: ${id}`;
     if (job.status === "running")
         return `Job ${id} is still running. Use /kiro-cli:status to check progress.`;
-    return job.result ?? "No result stored.";
+    return readJobResult(id) ?? job.note ?? "No result stored.";
 }
 export function cancel(args) {
     const id = args[0];

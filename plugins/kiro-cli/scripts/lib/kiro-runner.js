@@ -17,7 +17,7 @@
  */
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { loadJobRaw, saveJob } from "./jobs.js";
+import { loadJobRaw, saveJob, saveJobResult } from "./jobs.js";
 import { maxOutputBytes } from "./kiro.js";
 const [jobId, timeoutArg, kiroPath, ...kiroArgs] = process.argv.slice(2);
 if (!jobId || !timeoutArg || !kiroPath) {
@@ -106,10 +106,12 @@ function finalize(status, result) {
         status,
         startedAt: current?.startedAt ?? new Date().toISOString(),
         finishedAt: new Date().toISOString(),
-        result,
         ...(current?.pid !== undefined ? { pid: current.pid } : {}),
     };
     try {
+        // Transcript first, then the record that advertises it: a reader must never
+        // see a finished job whose output is not there yet.
+        job.resultBytes = saveJobResult(jobId, result);
         saveJob(job);
     }
     catch (e) {
@@ -136,6 +138,10 @@ child.stdout?.setEncoding("utf-8");
 child.stderr?.setEncoding("utf-8");
 child.stdout?.on("data", (d) => append(d, Buffer.byteLength(d)));
 child.stderr?.on("data", (d) => append(d, Buffer.byteLength(d)));
+// A stream error would otherwise be an unhandled 'error' event, and this
+// process must not die without tearing its group down.
+child.stdout?.on("error", (err) => { append(`\n[stdout error: ${err.message}]\n`, 0); });
+child.stderr?.on("error", (err) => { append(`\n[stderr error: ${err.message}]\n`, 0); });
 let settled = false;
 function settle(code, signal) {
     if (settled)
@@ -190,3 +196,22 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
         finalize("cancelled", `${chunks.join("")}\n\n[cancelled]`);
     });
 }
+/**
+ * Last line of defence. This process is the only supervisor kiro-cli has: if it
+ * dies on an unexpected throw, kiro-cli and its descendants are left with no
+ * timeout and no cancel target, running under --trust-all-tools. Record what we
+ * can and take the group down with us.
+ */
+function bailOut(what, err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`kiro-runner: ${what}: ${message}`);
+    try {
+        finalize("failed", `${chunks.join("")}\n\nERROR: the Kiro supervisor failed (${what}): ${message}`);
+    }
+    catch {
+        sweepGroup();
+        process.exit(1);
+    }
+}
+process.on("uncaughtException", (err) => { bailOut("uncaught exception", err); });
+process.on("unhandledRejection", (err) => { bailOut("unhandled rejection", err); });

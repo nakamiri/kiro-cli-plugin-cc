@@ -48,11 +48,13 @@ than silently granting it.
 | `KIRO_PLUGIN_NODE` | the running `node` | Node binary used to launch a job's supervisor |
 | `KIRO_PLUGIN_JOB_TTL_MS` | `604800000` | Age at which a finished job record is pruned |
 | `KIRO_PLUGIN_MAX_JOBS` | `50` | Cap on retained finished job records |
+| `KIRO_PLUGIN_MAX_JOB_BYTES` | `67108864` | Cap on retained transcript bytes across all records |
 
 Job records contain Kiro's full output, including source code from private
 repositories, so the jobs directory is per-user and not world-readable.
-Finished records are pruned when a new job starts -- by age and by count -- so
-the store stays bounded. A job still running is never pruned.
+Finished records are pruned when a new job starts -- by age, by count and by
+total transcript bytes -- so the store stays bounded. A job still running is
+never pruned.
 
 ## Install
 
@@ -93,9 +95,12 @@ that started it goes away. Track it with `/kiro-cli:status` and read it with
 `/kiro-cli:result`.
 
 Foreground runs go through the same supervisor and are recorded the same way,
-so their output is retrievable with `/kiro-cli:result` afterwards. `/kiro-cli:status`
-lists progress only: a result larger than 2 KB is reported by size rather than
-inlined, since a full review would otherwise be printed twice.
+so their output is retrievable with `/kiro-cli:result` afterwards.
+
+A job is stored as two files: `<id>.json` holds its metadata and `<id>.out`
+holds Kiro's transcript. `/kiro-cli:status` reads only the metadata, so listing
+jobs costs the same whether the transcripts behind them are kilobytes or
+gigabytes; `/kiro-cli:result` is what reads a transcript.
 
 ### `/kiro-cli:rescue`
 
@@ -141,7 +146,7 @@ TypeScript source is in `src/`, compiled output goes to `plugins/kiro-cli/script
 | --- | --- |
 | `src/kiro-companion.ts` | CLI entry point and slash-command implementations |
 | `src/kiro.ts` | Locating `kiro-cli`, building its argv, timeouts |
-| `src/jobs.ts` | Background job records: storage, validation, liveness |
+| `src/jobs.ts` | Job store: metadata and transcripts, validation, liveness, pruning |
 | `src/kiro-runner.ts` | Detached supervisor that owns a Kiro run and its process group |
 
 **Note**: The compiled output in `plugins/kiro-cli/scripts/lib/` is committed to the repository so that Claude Code can run the plugin without a build step on the user's machine. After modifying any TypeScript source, run `pnpm build` and commit the regenerated files.

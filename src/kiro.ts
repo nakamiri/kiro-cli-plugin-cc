@@ -83,3 +83,12 @@ export function jobTtlMs(): number {
 export function maxRetainedJobs(): number {
   return positiveIntEnv("KIRO_PLUGIN_MAX_JOBS", 50);
 }
+
+/**
+ * Upper bound on the transcript bytes kept across all retained records. The
+ * count cap alone is not a size bound: fifty runs at the default output cap
+ * would be half a gigabyte.
+ */
+export function maxRetainedJobBytes(): number {
+  return positiveIntEnv("KIRO_PLUGIN_MAX_JOB_BYTES", 64 * 1024 * 1024);
+}

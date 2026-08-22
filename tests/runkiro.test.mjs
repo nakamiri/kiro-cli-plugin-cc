@@ -4,8 +4,8 @@
 // non-detaching "background" mode both survived.
 import { test, beforeEach, afterEach } from "node:test";
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,11 @@ function fakeSlowKiro(seconds, markerPath) {
   const marker = markerPath ? `touch "${markerPath}"\n` : "";
   writeFileSync(path, `#!/bin/sh\nsleep ${seconds}\n${marker}echo "slow done"\n`, { mode: 0o755 });
   return path;
+}
+
+/** A job's transcript now lives beside its record, not inside it. */
+function resultOf(id) {
+  return readFileSync(join(jobsDir, `${id}.out`), "utf-8");
 }
 
 function readJobs() {
@@ -143,7 +148,7 @@ test("a background job completes after the process that started it has exited", 
   // spawnSync has already reaped the starter, so only a detached runner can finish this.
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running");
   assert.equal(job.status, "completed");
-  assert.match(job.result, /slow done/);
+  assert.match(resultOf(job.id), /slow done/);
   assert.ok(job.finishedAt);
 });
 
@@ -163,7 +168,7 @@ test("a failing background job is recorded as failed with its output", async () 
   const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running");
   assert.equal(job.status, "failed");
-  assert.match(job.result, /boom/);
+  assert.match(resultOf(job.id), /boom/);
 });
 
 test("cancel stops a running background job and its kiro-cli child", async () => {
@@ -186,7 +191,7 @@ test("cancel refuses a job that is no longer running instead of signalling its p
   mkdirSync(jobsDir, { recursive: true });
   writeFileSync(
     join(jobsDir, "done.json"),
-    JSON.stringify({ id: "done", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", pid: 1, result: "x" })
+    JSON.stringify({ id: "done", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", pid: 1 })
   );
   const r = run(["cancel", "done"]);
   assert.match(r.stdout, /already completed; nothing to cancel/);
@@ -201,7 +206,7 @@ test("a running job whose runner died is reported as failed, not as running fore
   );
   const s = JSON.parse(run(["status", "orphan"]).stdout);
   assert.equal(s.status, "failed");
-  assert.match(s.result, /without recording a result/);
+  assert.match(s.note, /without recording a result/);
   assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
 });
 
@@ -214,8 +219,9 @@ test("a corrupt or foreign json file in the jobs dir does not break any command"
   writeFileSync(join(jobsDir, "array.json"), "[1,2,3]");
   writeFileSync(
     join(jobsDir, "good.json"),
-    JSON.stringify({ id: "good", kind: "review", status: "completed", startedAt: "2026-01-02T00:00:00.000Z", result: "ok" })
+    JSON.stringify({ id: "good", kind: "review", status: "completed", startedAt: "2026-01-02T00:00:00.000Z", resultBytes: 2 })
   );
+  writeFileSync(join(jobsDir, "good.out"), "ok");
   for (const args of [["status"], ["result"], ["cancel"]]) {
     const r = run(args);
     assert.equal(r.status, 0, `${args[0]} exited ${r.status}: ${r.stderr}`);
@@ -280,7 +286,7 @@ test("a job finishes when kiro-cli exits but a descendant still holds its stdout
   const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
   assert.equal(job.status, "completed");
-  assert.match(job.result, /review body/);
+  assert.match(resultOf(job.id), /review body/);
 });
 
 test("a foreground run that exits non-zero still returns what kiro printed", () => {
@@ -304,9 +310,10 @@ test("multi-byte output survives pipe-read boundaries intact", async () => {
   );
   const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 30_000);
+  const body = resultOf(job.id);
   assert.equal(job.status, "completed");
-  assert.equal(job.result.includes("\uFFFD"), false, "output contains replacement characters");
-  assert.equal(job.result.length, unit.length * repeats);
+  assert.equal(body.includes("\uFFFD"), false, "output contains replacement characters");
+  assert.equal(body.length, unit.length * repeats);
 });
 
 test("truncation keeps the part of the overflowing chunk that fits", async () => {
@@ -316,9 +323,10 @@ test("truncation keeps the part of the overflowing chunk that fits", async () =>
     run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_OUTPUT_BYTES: "1000" }).stdout
   );
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
-  assert.match(job.result, /\[output truncated at 1000 bytes\]/);
+  const body = resultOf(job.id);
+  assert.match(body, /\[output truncated at 1000 bytes\]/);
   // Without the slice the whole first chunk was dropped and nothing was kept.
-  assert.equal(job.result.replace(/\n*\[output truncated.*$/s, "").length, 1000);
+  assert.equal(body.replace(/\n*\[output truncated.*$/s, "").length, 1000);
 });
 
 test("a prompt starting with a dash is passed as text, not parsed as an option", () => {
@@ -405,7 +413,7 @@ test("truncation honours a byte budget, not a character count", async () => {
     run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_OUTPUT_BYTES: "1000" }).stdout
   );
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
-  const kept = job.result.replace(/\n*\[output truncated.*$/s, "");
+  const kept = resultOf(job.id).replace(/\n*\[output truncated.*$/s, "");
   // Each character is 3 bytes, so a character-based slice kept 3000 bytes.
   assert.ok(Buffer.byteLength(kept) <= 1000, `kept ${Buffer.byteLength(kept)} bytes`);
   assert.ok(Buffer.byteLength(kept) > 900, `kept only ${Buffer.byteLength(kept)} bytes`);
@@ -432,7 +440,7 @@ test("a timeout beyond the timer limit is clamped instead of wrapping", async ()
   // An overflowed delay fired almost immediately and failed the job as a timeout.
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
   assert.equal(job.status, "completed");
-  assert.doesNotMatch(job.result, /timed out/);
+  assert.doesNotMatch(resultOf(job.id), /timed out/);
 });
 
 // --- Round-4 regressions ---
@@ -452,7 +460,7 @@ test("a runner that cannot be spawned is recorded as failed, not left crashing",
   assert.doesNotMatch(r.stdout, /"status":"started"/);
   const job = await waitForJob((j) => j.status !== "running", 10_000);
   assert.equal(job.status, "failed");
-  assert.match(job.result, /(could not start|could not spawn) the Kiro runner/);
+  assert.match(job.note, /(could not start|could not spawn) the Kiro runner/);
 });
 
 test("a symlinked default jobs directory is refused", () => {
@@ -501,7 +509,7 @@ test("a finished run is still recorded when its record lost the pid mid-flight",
   );
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
   assert.equal(job.status, "completed");
-  assert.match(job.result, /slow done/);
+  assert.match(resultOf(job.id), /slow done/);
 });
 
 // --- Round-5 regressions ---
@@ -510,8 +518,9 @@ test("a job id that escapes the jobs directory is refused", () => {
   const outside = join(tmpDir, "outside.json");
   writeFileSync(
     outside,
-    JSON.stringify({ id: "outside", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", result: "SECRET CONTENT" })
+    JSON.stringify({ id: "outside", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", resultBytes: 14 })
   );
+  writeFileSync(join(tmpDir, "outside.out"), "SECRET CONTENT");
   mkdirSync(jobsDir, { recursive: true });
   for (const id of ["../outside", "../../etc/passwd", "/etc/passwd", "..", "a/b"]) {
     for (const cmd of ["status", "result", "cancel"]) {
@@ -545,8 +554,9 @@ test("reading a job by id also clears the symlink guard", () => {
   mkdirSync(evil, { mode: 0o700 });
   writeFileSync(
     join(evil, "planted.json"),
-    JSON.stringify({ id: "planted", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", result: "ATTACKER TEXT" })
+    JSON.stringify({ id: "planted", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", resultBytes: 13 })
   );
+  writeFileSync(join(evil, "planted.out"), "ATTACKER TEXT");
   symlinkSync(evil, join(home, `kiro-plugin-cc-jobs-${process.getuid()}`));
   const env = { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home };
   for (const args of [["status"], ["status", "planted"], ["result", "planted"], ["cancel", "planted"]]) {
@@ -605,9 +615,10 @@ test("--base followed by --background still detaches, with HEAD as the ref", asy
   const kiro = fakeEchoKiro();
   const { jobId } = JSON.parse(run(["review", "--base", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running");
+  const body = resultOf(job.id);
   assert.equal(job.status, "completed");
-  assert.match(job.result, /Compare against HEAD\./);
-  assert.doesNotMatch(job.result, /Compare against --/);
+  assert.match(body, /Compare against HEAD\./);
+  assert.doesNotMatch(body, /Compare against --/);
 });
 
 test("--base at the end of the arguments falls back to HEAD", () => {
@@ -700,7 +711,7 @@ test("status keeps a short failure explanation inline", () => {
   );
   const job = JSON.parse(run(["status", "orphan2"]).stdout);
   assert.equal(job.status, "failed");
-  assert.match(job.result, /without recording a result/);
+  assert.match(job.note, /without recording a result/);
 });
 
 test("a foreground run is recorded, so its output survives the caller", () => {
@@ -743,7 +754,7 @@ test("old terminal records are pruned when a new job starts", async () => {
   const old = new Date(Date.now() - 60_000).toISOString();
   writeFileSync(
     join(jobsDir, "kiro-old-one.json"),
-    JSON.stringify({ id: "kiro-old-one", kind: "review", status: "completed", startedAt: old, finishedAt: old, result: "stale" })
+    JSON.stringify({ id: "kiro-old-one", kind: "review", status: "completed", startedAt: old, finishedAt: old })
   );
   const { jobId } = JSON.parse(
     run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000" }).stdout
@@ -763,7 +774,7 @@ test("pruning keeps running jobs and respects the retention cap", async () => {
     const ts = new Date(Date.now() - age).toISOString();
     writeFileSync(
       join(jobsDir, `kiro-keep-${n}.json`),
-      JSON.stringify({ id: `kiro-keep-${n}`, kind: "review", status: "completed", startedAt: ts, finishedAt: ts, result: "x" })
+      JSON.stringify({ id: `kiro-keep-${n}`, kind: "review", status: "completed", startedAt: ts, finishedAt: ts })
     );
   }
   const echo = fakeEchoKiro("cap-kiro");
@@ -817,9 +828,10 @@ test("a timeout expiring during the flush grace window does not fail a finished 
     run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: "900" }).stdout
   );
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
+  const body = resultOf(job.id);
   assert.equal(job.status, "completed");
-  assert.doesNotMatch(job.result, /timed out/);
-  assert.match(job.result, /the review/);
+  assert.doesNotMatch(body, /timed out/);
+  assert.match(body, /the review/);
 });
 
 test("the same run in the foreground is not reported as a timeout either", () => {
@@ -838,7 +850,7 @@ test("a retention age longer than the timer ceiling is honoured", () => {
   const ts = new Date(Date.now() - 26 * 24 * 60 * 60 * 1000).toISOString();
   writeFileSync(
     join(jobsDir, "kiro-aged-one.json"),
-    JSON.stringify({ id: "kiro-aged-one", kind: "review", status: "completed", startedAt: ts, finishedAt: ts, result: "x" })
+    JSON.stringify({ id: "kiro-aged-one", kind: "review", status: "completed", startedAt: ts, finishedAt: ts })
   );
   run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "2592000000" });
   assert.ok(readJobs().some((j) => j.id === "kiro-aged-one"), "a 26-day-old record was pruned under a 30-day TTL");
@@ -857,7 +869,89 @@ test("a descendant that redirected its own stdio does not outlive the run", asyn
   const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
   assert.equal(job.status, "completed");
-  assert.match(job.result, /the review/);
+  assert.match(resultOf(job.id), /the review/);
   await new Promise((r) => setTimeout(r, 6500));
   assert.equal(existsSync(marker), false, "a descendant outlived the supervisor");
+});
+
+// --- Round-12 regressions ---
+
+function writeStoredJob(id, { status = "completed", ageMs = 0, body = "" } = {}) {
+  const ts = new Date(Date.now() - ageMs).toISOString();
+  writeFileSync(
+    join(jobsDir, `${id}.json`),
+    JSON.stringify({ id, kind: "review", status, startedAt: ts, finishedAt: ts, resultBytes: Buffer.byteLength(body) })
+  );
+  writeFileSync(join(jobsDir, `${id}.out`), body);
+}
+
+test("listing jobs does not pay for the transcripts behind them", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  const body = "x".repeat(2 * 1024 * 1024);
+  for (let i = 0; i < 8; i++) writeStoredJob(`kiro-heavy${i}-aa`, { ageMs: i * 1000, body });
+  // Records used to carry the transcript inline, so listing eight of these
+  // parsed 16 MB; fifty at the default output cap exhausted the heap outright.
+  const r = spawnSync(process.execPath, ["--max-old-space-size=128", COMPANION, "status"], {
+    encoding: "utf-8",
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir },
+  });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  const listed = JSON.parse(r.stdout);
+  assert.equal(listed.length, 8);
+  assert.equal(listed[0].result, undefined);
+  assert.equal(listed[0].resultBytes, body.length);
+});
+
+test("pruning enforces a byte budget, not just a count", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  const body = "y".repeat(600);
+  for (const n of ["a", "b", "c", "d"]) writeStoredJob(`kiro-bytes${n}-aa`, { ageMs: 5000, body });
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_MAX_JOBS: "50" });
+  const remaining = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-bytes"));
+  // Four 600-byte transcripts are inside the count cap and over the byte one.
+  assert.ok(remaining.filter((f) => f.endsWith(".out")).length <= 2, `kept ${remaining}`);
+});
+
+test("pruning removes records nothing can read, orphaned output and stale temporaries", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(join(jobsDir, "kiro-corrupt-aa.json"), '{"id":"kiro-corrupt-aa","kind":"rev');
+  writeFileSync(join(jobsDir, "kiro-mismatch-aa.json"), JSON.stringify({ id: "other", kind: "review", status: "completed", startedAt: new Date().toISOString() }));
+  writeFileSync(join(jobsDir, "kiro-orphan-aa.out"), "no record points here");
+  writeFileSync(join(jobsDir, ".tmp-999-1.tmp"), "abandoned write");
+  const stale = new Date(Date.now() - 60_000);
+  for (const f of readdirSync(jobsDir)) utimesSync(join(jobsDir, f), stale, stale);
+
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000" });
+  const left = readdirSync(jobsDir);
+  // pruneJobs used to walk listJobs(), which cannot see any of these.
+  for (const gone of ["kiro-corrupt-aa.json", "kiro-mismatch-aa.json", "kiro-orphan-aa.out", ".tmp-999-1.tmp"]) {
+    assert.equal(left.includes(gone), false, `${gone} survived pruning`);
+  }
+});
+
+test("a foreground wait stops when its record is removed underneath it", async () => {
+  const kiro = fakeSlowKiro(20);
+  mkdirSync(jobsDir, { recursive: true });
+  const child = spawn(process.execPath, [COMPANION, "review"], {
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir, KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "15000" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let out = "";
+  child.stdout.setEncoding("utf-8");
+  child.stdout.on("data", (d) => { out += d; });
+
+  const started = Date.now();
+  while (Date.now() - started < 5000) {
+    const meta = readdirSync(jobsDir).find((f) => f.endsWith(".json"));
+    if (meta) { unlinkSync(join(jobsDir, meta)); break; }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  // A missing record used to read as "still running", so the wait ran out the
+  // whole budget and then reported a timeout that had not happened.
+  assert.equal(code, 0);
+  assert.ok(Date.now() - started < 12_000, "the wait ran to its deadline");
+  assert.match(out, /disappeared while waiting/);
 });

@@ -15,7 +15,7 @@ beforeEach(() => {
 });
 
 // Import after setting the env var so the module reads it lazily via getJobsDir().
-const { saveJob, loadJob, loadJobRaw, listJobs, cancel, status, result, getJobsDir } =
+const { saveJob, saveJobResult, loadJob, loadJobRaw, listJobs, cancel, status, result, getJobsDir } =
   await import("../plugins/kiro-cli/scripts/lib/kiro-companion.js");
 
 // A record that claims "running" is only believed while it plausibly still is:
@@ -95,14 +95,10 @@ test("status command: lists multiple jobs as JSON array", () => {
 });
 
 test("result command: returns latest completed job result by default", () => {
-  saveJob({
-    id: "old", kind: "review", status: "completed",
-    startedAt: "2026-01-01T00:00:00.000Z", result: "old-output",
-  });
-  saveJob({
-    id: "new", kind: "review", status: "completed",
-    startedAt: "2026-01-05T00:00:00.000Z", result: "new-output",
-  });
+  saveJob({ id: "old", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z" });
+  saveJobResult("old", "old-output");
+  saveJob({ id: "new", kind: "review", status: "completed", startedAt: "2026-01-05T00:00:00.000Z" });
+  saveJobResult("new", "new-output");
   saveJob({
     id: "running", kind: "rescue", status: "running",
     startedAt: "2026-01-10T00:00:00.000Z",
@@ -111,10 +107,8 @@ test("result command: returns latest completed job result by default", () => {
 });
 
 test("result command: by ID returns that job's result", () => {
-  saveJob({
-    id: "specific", kind: "review", status: "completed",
-    startedAt: "2026-01-01T00:00:00.000Z", result: "specific-output",
-  });
+  saveJob({ id: "specific", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z" });
+  saveJobResult("specific", "specific-output");
   assert.equal(result(["specific"]), "specific-output");
 });
 
@@ -170,6 +164,6 @@ test("a pid-less running record is reported as failed once its launch window pas
   saveJob({ id: "stillborn", kind: "review", status: "running", startedAt: "2026-01-01T00:00:00.000Z" });
   const job = loadJob("stillborn");
   assert.equal(job.status, "failed");
-  assert.match(job.result, /never started/);
+  assert.match(job.note, /never started/);
   assert.equal(cancel([]), "No running jobs to cancel.");
 });
