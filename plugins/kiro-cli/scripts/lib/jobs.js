@@ -53,6 +53,15 @@ export function isValidJobId(id) {
 const META_EXT = ".json";
 const OUT_EXT = ".out";
 const TMP_PREFIX = ".tmp-";
+/**
+ * The shape genId() produces. Pruning deletes files, so it only ever touches
+ * names this plugin could itself have written -- an operator who points
+ * KIRO_PLUGIN_JOBS_DIR at a directory of their own must not lose anything in
+ * it. `isValidJobId` is far too permissive for that: it accepts "package",
+ * which is how a stray package.json came to be deleted.
+ */
+const GENERATED_ID_RE = /^kiro-[0-9a-z]+-[0-9a-z]+$/;
+const TMP_RE = /^\.tmp-\d+-\d+\.tmp$/;
 function requireId(id) {
     if (!isValidJobId(id))
         throw new Error(`invalid job id: ${id}`);
@@ -70,6 +79,7 @@ function outPath(id) {
 /** Write-then-rename, so a reader never observes a half-written file. */
 function writeAtomic(target, data) {
     const dir = ensureJobsDir();
+    // Matched by TMP_RE, so an abandoned one is recognisably ours to clean up.
     const tmp = join(dir, `${TMP_PREFIX}${process.pid}-${target.length}.tmp`);
     try {
         writeFileSync(tmp, data, { mode: 0o600 });
@@ -271,15 +281,17 @@ function ageOf(dir, name) {
 }
 /**
  * Keeps the store bounded. Every run -- foreground included -- leaves a record
- * and a transcript, so without this the directory grows without limit and every
- * listing pays to parse it. Three budgets apply to finished jobs: age, count
- * and total transcript bytes. A running job is never touched.
+ * and a transcript, so without this the directory grows without limit. Three
+ * budgets apply to finished jobs: age, count and total transcript bytes. A
+ * running job is never touched.
  *
- * The scan is over the directory, not over listJobs(): a record listJobs
- * rejects (corrupt, mismatched id, unusable timestamp), an orphaned transcript
- * and an abandoned temporary file are all invisible to it and would otherwise
- * accumulate for ever. Best effort throughout -- housekeeping must not be able
- * to fail a job.
+ * The scan is over the directory rather than over listJobs(), so that a record
+ * listJobs rejects (corrupt, mismatched id, unusable timestamp), an orphaned
+ * transcript and an abandoned temporary file are cleaned up too -- none of them
+ * is visible to it. Only names this plugin could have generated are ever
+ * removed, and only once past the TTL; everything else in the directory is left
+ * strictly alone. Best effort throughout -- housekeeping must not be able to
+ * fail a job.
  */
 export function pruneJobs() {
     let dir;
@@ -294,10 +306,10 @@ export function pruneJobs() {
     const ttl = jobTtlMs();
     const live = new Set();
     const terminal = [];
-    const orphanCandidates = [];
+    const transcripts = [];
     for (const name of names) {
-        if (name.startsWith(TMP_PREFIX)) {
-            // An abandoned write. Nothing reads these, so age alone decides.
+        if (TMP_RE.test(name)) {
+            // An abandoned write of ours. Nothing reads these, so age alone decides.
             if (ageOf(dir, name) > ttl) {
                 try {
                     unlinkSync(join(dir, name));
@@ -306,16 +318,21 @@ export function pruneJobs() {
             }
             continue;
         }
-        if (name.endsWith(OUT_EXT))
-            continue;
-        if (!name.endsWith(META_EXT)) {
-            orphanCandidates.push(name);
+        if (name.endsWith(OUT_EXT)) {
+            const id = name.slice(0, -OUT_EXT.length);
+            if (GENERATED_ID_RE.test(id))
+                transcripts.push(id);
             continue;
         }
+        if (!name.endsWith(META_EXT))
+            continue;
         const id = name.slice(0, -META_EXT.length);
+        if (!GENERATED_ID_RE.test(id))
+            continue;
         const job = readJobFile(join(dir, name), id);
         if (!job) {
-            // Unreadable by every other code path, so it can only ever take up space.
+            // Ours by name but unreadable by every other code path, so it can only
+            // ever take up space.
             if (ageOf(dir, name) > ttl)
                 removeJobFiles(dir, id);
             continue;
@@ -348,24 +365,18 @@ export function pruneJobs() {
     }
     for (const id of doomed)
         removeJobFiles(dir, id);
-    // A transcript whose record is gone is unreachable; so is any other stray.
-    for (const name of orphanCandidates) {
-        if (ageOf(dir, name) > ttl) {
+    // A transcript whose record is gone is unreachable. Age-guarded like every
+    // other stale-file path, so a young record that merely failed to parse this
+    // time does not lose its output.
+    const retained = new Set(terminal.filter((j) => !doomed.has(j.id)).map((j) => j.id));
+    for (const id of transcripts) {
+        if (live.has(id) || retained.has(id) || doomed.has(id))
+            continue;
+        if (ageOf(dir, `${id}${OUT_EXT}`) > ttl) {
             try {
-                unlinkSync(join(dir, name));
+                unlinkSync(join(dir, `${id}${OUT_EXT}`));
             }
             catch { /* best effort */ }
         }
-    }
-    for (const name of names) {
-        if (!name.endsWith(OUT_EXT))
-            continue;
-        const id = name.slice(0, -OUT_EXT.length);
-        if (live.has(id) || (terminal.some((j) => j.id === id) && !doomed.has(id)))
-            continue;
-        try {
-            unlinkSync(join(dir, name));
-        }
-        catch { /* best effort */ }
     }
 }

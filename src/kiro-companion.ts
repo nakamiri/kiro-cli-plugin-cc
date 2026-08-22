@@ -96,8 +96,13 @@ function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: numb
   // outside its try/catch, so the command died with a stack trace.
   child.on("error", (err) => {
     try {
+      // Re-read first. This can also fire after a successful spawn, and during
+      // a foreground wait the runner may already have recorded a result --
+      // writing the pre-spawn snapshot over it would discard the run.
+      const current = loadJobRaw(job.id);
+      if (current && current.status !== "running") return;
       saveJob({
-        ...job,
+        ...(current ?? job),
         status: "failed",
         finishedAt: new Date().toISOString(),
         note: `ERROR: could not start the Kiro runner: ${err.message}`,

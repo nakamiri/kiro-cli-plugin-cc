@@ -943,15 +943,70 @@ test("a foreground wait stops when its record is removed underneath it", async (
   child.stdout.on("data", (d) => { out += d; });
 
   const started = Date.now();
+  let removed = false;
   while (Date.now() - started < 5000) {
-    const meta = readdirSync(jobsDir).find((f) => f.endsWith(".json"));
-    if (meta) { unlinkSync(join(jobsDir, meta)); break; }
+    // Wait for the record to carry a pid: before that the launcher is about to
+    // rewrite it, and deleting it would not be a disappearance at all.
+    const meta = readJobs().find((j) => typeof j.pid === "number");
+    if (meta) {
+      unlinkSync(join(jobsDir, `${meta.id}.json`));
+      removed = true;
+      break;
+    }
     await new Promise((r) => setTimeout(r, 50));
   }
+  assert.ok(removed, "never saw a record with a pid to remove");
   const code = await new Promise((resolve) => child.on("close", resolve));
   // A missing record used to read as "still running", so the wait ran out the
   // whole budget and then reported a timeout that had not happened.
   assert.equal(code, 0);
   assert.ok(Date.now() - started < 12_000, "the wait ran to its deadline");
   assert.match(out, /disappeared while waiting/);
+});
+
+// --- Round-13 regressions ---
+
+test("pruning leaves files it did not write strictly alone", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // An operator may point KIRO_PLUGIN_JOBS_DIR at a directory of their own.
+  const bystanders = {
+    "notes.md": "keep me",
+    "build.log": "keep me too",
+    "package.json": '{"name":"not-a-job"}',
+    "package.out": "nor this",
+    "kiro-not-an-id.json": "{}",
+    ".tmp-hand-written.tmp": "not our shape",
+  };
+  for (const [name, body] of Object.entries(bystanders)) writeFileSync(join(jobsDir, name), body);
+  const stale = new Date(Date.now() - 120_000);
+  for (const name of Object.keys(bystanders)) utimesSync(join(jobsDir, name), stale, stale);
+
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000" });
+
+  const left = readdirSync(jobsDir);
+  for (const [name, body] of Object.entries(bystanders)) {
+    assert.ok(left.includes(name), `${name} was deleted`);
+    assert.equal(readFileSync(join(jobsDir, name), "utf-8"), body, `${name} was modified`);
+  }
+});
+
+test("a young unreadable record keeps its transcript", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(join(jobsDir, "kiro-young-aa.json"), '{"id":"kiro-young-aa","kind":"rev');
+  writeFileSync(join(jobsDir, "kiro-young-aa.out"), "recoverable output");
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "3600000" });
+  // The transcript sweep used to run without an age guard.
+  assert.ok(readdirSync(jobsDir).includes("kiro-young-aa.out"), "a young transcript was deleted");
+});
+
+test("an old orphaned transcript is still cleaned up", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(join(jobsDir, "kiro-old2-aa.out"), "no record points here");
+  const stale = new Date(Date.now() - 120_000);
+  utimesSync(join(jobsDir, "kiro-old2-aa.out"), stale, stale);
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000" });
+  assert.equal(readdirSync(jobsDir).includes("kiro-old2-aa.out"), false);
 });
