@@ -21,9 +21,10 @@ export function buildReviewPrompt(args: string[]): string {
     if (a === "--background" || a === "--wait") continue;
     if (a === "--base") {
       const next = args[i + 1];
-      // A flag is never a git ref: "--base --background" used to make
-      // "--background" the ref while still detaching the job.
-      if (next !== undefined && !next.startsWith("-")) {
+      // Neither a flag nor an empty string is a git ref: "--base --background"
+      // used to make "--background" the ref, and "--base ''" produced the
+      // prompt "Compare against ." instead of falling back to HEAD.
+      if (next !== undefined && next !== "" && !next.startsWith("-")) {
         base = next;
         i++;
       }
@@ -46,6 +47,15 @@ export function buildRescuePrompt(args: string[]): string {
 
 export function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
+}
+
+/**
+ * `--wait` wins over `--background`, which is the precedence the commands
+ * document. It was parsed nowhere, so asking to wait and getting a detached
+ * job was the actual behaviour.
+ */
+export function wantsBackground(args: string[]): boolean {
+  return hasFlag(args, "--background") && !hasFlag(args, "--wait");
 }
 
 /**
@@ -233,11 +243,11 @@ export function setup(args: string[]): string {
 }
 
 export function review(args: string[]): Promise<string> {
-  return runKiro("review", buildReviewPrompt(args), hasFlag(args, "--background"));
+  return runKiro("review", buildReviewPrompt(args), wantsBackground(args));
 }
 
 export function rescue(args: string[]): Promise<string> {
-  return runKiro("rescue", buildRescuePrompt(args), hasFlag(args, "--background"));
+  return runKiro("rescue", buildRescuePrompt(args), wantsBackground(args));
 }
 
 export function status(args: string[]): string {

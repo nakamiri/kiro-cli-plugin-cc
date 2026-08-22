@@ -35,7 +35,14 @@ export function findKiro() {
         return process.env.KIRO_CLI_PATH;
     try {
         // execFile, not a shell: nothing here is interpolated into a command line.
-        const p = execFileSync("which", ["kiro-cli"], { encoding: "utf-8" }).trim();
+        // Bounded like every other probe -- a hung PATH entry would otherwise block
+        // every command before any of the configured budgets could apply.
+        const p = execFileSync("which", ["kiro-cli"], {
+            encoding: "utf-8",
+            timeout: 10_000,
+            killSignal: "SIGKILL",
+            stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
         return p || null;
     }
     catch {

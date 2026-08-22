@@ -1027,3 +1027,69 @@ test("a run that printed nothing says so instead of returning a blank line", asy
   assert.match(run(["result", jobId]).stdout, /No result stored|No output was recorded/);
   assert.match(run(["result"]).stdout, /No result stored|No output was recorded/);
 });
+
+// --- Round-15 regressions ---
+
+test("--wait wins over --background, as the commands document", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--wait", "--background"], { KIRO_CLI_PATH: kiro });
+  // --wait was parsed nowhere, so asking to wait produced a detached job.
+  assert.doesNotMatch(r.stdout, /"status":"started"/);
+  assert.match(r.stdout, /^ARG:chat$/m);
+});
+
+test("--background alone still detaches", () => {
+  const kiro = fakeEchoKiro();
+  assert.equal(JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout).status, "started");
+});
+
+test("--base with an empty value falls back to HEAD", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base", ""], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against HEAD\./);
+  assert.doesNotMatch(r.stdout, /Compare against \./);
+});
+
+test("a record with a non-numeric resultBytes is rejected, not summed", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(
+    join(jobsDir, "kiro-badbytes-aa.json"),
+    JSON.stringify({ id: "kiro-badbytes-aa", kind: "review", status: "completed", startedAt: new Date().toISOString(), resultBytes: "9999" })
+  );
+  // Summed as a string it concatenated, inflating the byte accumulator and
+  // pruning transcripts that were well inside the budget.
+  assert.equal(run(["status"]).stdout.trim(), "No Kiro jobs found.");
+});
+
+test("a record with an unparseable finishedAt is rejected, not immune to pruning", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(
+    join(jobsDir, "kiro-badfin-aa.json"),
+    JSON.stringify({ id: "kiro-badfin-aa", kind: "review", status: "completed", startedAt: new Date().toISOString(), finishedAt: "whenever" })
+  );
+  assert.equal(run(["status"]).stdout.trim(), "No Kiro jobs found.");
+});
+
+test("a job whose record is removed mid-run is discarded, not refiled", async () => {
+  const kiro = fakeSlowKiro(2);
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  unlinkSync(join(jobsDir, `${jobId}.json`));
+  await new Promise((r) => setTimeout(r, 4000));
+  // It used to be resurrected with kind "task" and a startedAt of now, so a
+  // review reappeared as a rescue that had apparently taken no time at all.
+  assert.equal(readdirSync(jobsDir).includes(`${jobId}.json`), false);
+  assert.equal(run(["status"]).stdout.trim(), "No Kiro jobs found.");
+});
+
+test("the PATH lookup for kiro-cli is bounded", () => {
+  const bin = join(tmpDir, "slowbin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "which"), "#!/bin/sh\ntrap '' TERM\nsleep 40\n", { mode: 0o755 });
+  const started = Date.now();
+  const r = run(["setup"], { KIRO_CLI_PATH: "", PATH: `${bin}:${process.env.PATH}` });
+  const elapsed = Date.now() - started;
+  // Unbounded, this blocked for the full 40s before any budget could apply.
+  assert.ok(elapsed < 20_000, `waited ${elapsed}ms`);
+  assert.match(r.stdout, /not installed/);
+});

@@ -176,6 +176,19 @@ function readJobFile(path: string, expectedId: string): Job | null {
   // startedAt drives both sorting and the launch-window check, so a value that
   // does not parse makes the record unusable rather than merely odd.
   if (!Number.isFinite(Date.parse(job.startedAt))) return null;
+  // finishedAt decides the TTL sweep: an unparseable value compares NaN, which
+  // is false either way, and made the record permanently immune to pruning.
+  if (job.finishedAt !== undefined) {
+    if (typeof job.finishedAt !== "string" || !Number.isFinite(Date.parse(job.finishedAt))) return null;
+  }
+  // resultBytes is summed against the byte budget. A string would concatenate
+  // instead of adding, inflating the accumulator and pruning transcripts that
+  // are well inside it.
+  if (job.resultBytes !== undefined) {
+    if (typeof job.resultBytes !== "number" || !Number.isFinite(job.resultBytes) || job.resultBytes < 0) return null;
+  }
+  if (job.pid !== undefined && (typeof job.pid !== "number" || !Number.isInteger(job.pid))) return null;
+  if (job.note !== undefined && typeof job.note !== "string") return null;
   return job as Job;
 }
 

@@ -93,7 +93,16 @@ function finalize(status, result) {
         sweepGroup();
         process.exit(1);
     }
-    if (current && current.status !== "running") {
+    if (current === null) {
+        // The launcher always writes the record before spawning us, so its absence
+        // means somebody removed it. Writing a fresh one would file this run under
+        // invented metadata -- a review recorded as a rescue that took no time at
+        // all -- so discard the result instead of resurrecting the job.
+        console.error(`kiro-runner: job ${jobId} no longer exists; discarding its result`);
+        sweepGroup();
+        process.exit(0);
+    }
+    if (current.status !== "running") {
         // Someone else recorded the outcome first -- most likely `cancel` after its
         // settle window. Still tear the group down, or a SIGTERM-ignoring kiro-cli
         // would be left with no supervisor and no timeout.
@@ -101,12 +110,9 @@ function finalize(status, result) {
         process.exit(0);
     }
     const job = {
-        id: jobId,
-        kind: current?.kind ?? "task",
+        ...current,
         status,
-        startedAt: current?.startedAt ?? new Date().toISOString(),
         finishedAt: new Date().toISOString(),
-        ...(current?.pid !== undefined ? { pid: current.pid } : {}),
     };
     try {
         // Transcript first, then the record that advertises it: a reader must never

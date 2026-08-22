@@ -35,6 +35,15 @@ than silently granting it.
 
 `/kiro-cli:setup` reports which mode is active.
 
+### Prompts are visible in the process list
+
+Kiro CLI takes its prompt as a command-line argument, so for the duration of a
+run the review request or task description is visible to any other user on the
+same host via `ps` or `/proc/<pid>/cmdline`. This is inherent to invoking
+`kiro-cli chat <prompt>` and is not something the plugin can hide. Job records
+and transcripts on disk are not exposed this way -- they are 0600 in a 0700
+per-user directory. On a shared host, keep sensitive context out of the prompt.
+
 ## Configuration
 
 | Variable | Default | Purpose |
