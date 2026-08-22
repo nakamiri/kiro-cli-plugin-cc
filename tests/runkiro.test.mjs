@@ -1520,3 +1520,38 @@ test("cancel refuses a pid that the probe reports as another process", () => {
   assert.doesNotMatch(r.stdout, /^Cancelled job/);
   assert.equal(process.kill(1, 0), true, "pid 1 was signalled");
 });
+
+// --- Round-22 regressions ---
+
+test("one oversized transcript does not doom older records that fit", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  const sizes = [["big", 3000, 1000], ["small1", 6000, 2], ["small2", 9000, 2]];
+  for (const [n, age, bytes] of sizes) {
+    const ts = new Date(Date.now() - age).toISOString();
+    writeFileSync(join(jobsDir, `kiro-floor${n}-aa.json`), JSON.stringify({
+      id: `kiro-floor${n}-aa`, kind: "review", status: "completed",
+      startedAt: ts, finishedAt: ts, resultBytes: bytes,
+    }));
+    writeFileSync(join(jobsDir, `kiro-floor${n}-aa.out`), "p".repeat(bytes));
+  }
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "100", KIRO_PLUGIN_MAX_JOBS: "50" });
+  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-floor") && f.endsWith(".json"));
+  // Charging the exempt newest record wiped out both two-byte transcripts.
+  assert.ok(left.includes("kiro-floorbig-aa.json"), "the newest was pruned");
+  assert.equal(left.length, 3, `older records that fit were pruned: ${left}`);
+});
+
+test("the focus text does not run into the rest of the prompt", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "the auth paths"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Focus on: the auth paths\. Provide a thorough/);
+  assert.doesNotMatch(r.stdout, /the auth paths Provide/);
+});
+
+test("focus text that already ends in a full stop is not doubled", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "check the auth paths."], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Focus on: check the auth paths\. Provide/);
+  assert.doesNotMatch(r.stdout, /paths\.\./);
+});

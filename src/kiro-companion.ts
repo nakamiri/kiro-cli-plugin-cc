@@ -55,7 +55,9 @@ export function buildReviewPrompt(rawArgs: string[]): string {
   }
   const extra = [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
   let prompt = `Review the code changes. Compare against ${base}.`;
-  if (extra) prompt += ` Focus on: ${extra}`;
+  // Terminated: without the full stop the focus text ran straight into the
+  // next sentence of the prompt.
+  if (extra) prompt += ` Focus on: ${extra.replace(/[.\s]+$/, "")}.`;
   prompt += " Provide a thorough code review covering correctness, security, performance, and style.";
   return prompt;
 }

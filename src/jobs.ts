@@ -485,15 +485,18 @@ export function pruneJobs(): void {
   let keptAny = false;
   for (const job of terminal) {
     if (doomed.has(job.id)) continue;
-    kept += job.resultBytes ?? 0;
-    // The newest survivor is always retained, however large. The count cap has
-    // this floor for free (its minimum is one); without it here, raising
-    // KIRO_PLUGIN_MAX_OUTPUT_BYTES above the byte budget meant the next job
-    // start deleted the run just finished, before anyone had read it.
+    // The newest survivor is always retained, however large, and is not charged
+    // against the budget -- charging it meant a single oversized transcript
+    // exhausted the budget on its own and doomed every older record that would
+    // have fitted. The count cap has this floor for free (its minimum is one);
+    // without it here, raising KIRO_PLUGIN_MAX_OUTPUT_BYTES above the byte
+    // budget meant the next job start deleted the run just finished, before
+    // anyone had read it.
     if (!keptAny) {
       keptAny = true;
       continue;
     }
+    kept += job.resultBytes ?? 0;
     if (kept > byteBudget) doomed.add(job.id);
   }
 
