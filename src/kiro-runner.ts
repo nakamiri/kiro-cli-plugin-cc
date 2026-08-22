@@ -9,17 +9,21 @@
  * Kiro is deliberately left in this process's group: `cancel` signals the group
  * by negated pid, and that is what stops kiro-cli along with the supervisor.
  *
- * Usage: node kiro-runner.js <jobId> <kiroPath> [kiroArgs...]
+ * Foreground runs go through it too: it is the only place that owns a process
+ * group, so it is the only place that can guarantee a timeout takes kiro-cli's
+ * descendants down with it.
+ *
+ * Usage: node kiro-runner.js <jobId> <timeoutMs> <kiroPath> [kiroArgs...]
  */
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { loadJobRaw, saveJob, type Job } from "./jobs.js";
-import { backgroundTimeoutMs, maxOutputBytes } from "./kiro.js";
+import { maxOutputBytes } from "./kiro.js";
 
-const [jobId, kiroPath, ...kiroArgs] = process.argv.slice(2);
+const [jobId, timeoutArg, kiroPath, ...kiroArgs] = process.argv.slice(2);
 
-if (!jobId || !kiroPath) {
-  console.error("kiro-runner: usage: kiro-runner.js <jobId> <kiroPath> [kiroArgs...]");
+if (!jobId || !timeoutArg || !kiroPath) {
+  console.error("kiro-runner: usage: kiro-runner.js <jobId> <timeoutMs> <kiroPath> [kiroArgs...]");
   process.exit(2);
 }
 
@@ -30,7 +34,7 @@ if (!jobId || !kiroPath) {
  */
 const FLUSH_GRACE_MS = 2_000;
 
-const timeoutMs = backgroundTimeoutMs();
+const timeoutMs = Number(timeoutArg);
 const maxBytes = maxOutputBytes();
 let timedOut = false;
 let finalized = false;
@@ -71,7 +75,16 @@ function finalize(status: Job["status"], result: string, sweep = false): void {
   // Re-read so a concurrent `cancel` that already set "cancelled" is not undone.
   // Raw, deliberately: the reconciled view reports a record that never got its
   // pid write as "failed", and this runner would then discard a finished run.
-  const current = loadJobRaw(jobId!);
+  // Guarded like the write below: this runs from the signal handler too, and a
+  // throw here would lose both the record and the group teardown.
+  let current: Job | null = null;
+  try {
+    current = loadJobRaw(jobId!);
+  } catch (e) {
+    console.error(`kiro-runner: could not read job ${jobId}: ${(e as Error).message}`);
+    if (sweep) sweepGroup();
+    process.exit(1);
+  }
   if (current && current.status !== "running") {
     // Someone else recorded the outcome first -- most likely `cancel` after its
     // settle window. Still tear the group down, or a SIGTERM-ignoring kiro-cli

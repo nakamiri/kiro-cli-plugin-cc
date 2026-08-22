@@ -160,6 +160,8 @@ export function pidCommandLine(pid: number): string | null {
     return execFileSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: 5_000,
+      // Without this the timeout only sends SIGTERM and then keeps waiting.
+      killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   } catch {

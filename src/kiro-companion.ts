@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type Job, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
-import { chatArgs, findKiro, foregroundTimeoutMs, maxOutputBytes, nodeBinary, trustAllTools } from "./kiro.js";
+import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
 
 export type { Job };
 export { getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, saveJob } from "./jobs.js";
@@ -75,18 +75,20 @@ function runnerPath(): string {
 }
 
 /**
- * Starts Kiro in a detached supervisor process and returns immediately. The
- * supervisor -- not this process -- records the terminal job state, so the job
- * completes even if the caller exits the moment this returns.
+ * Starts Kiro under a detached supervisor and returns the job, or an error
+ * string. Both execution modes go through here: the supervisor owns a process
+ * group, which is the only way a timeout can take kiro-cli's descendants with
+ * it, and the only way a job survives the caller exiting.
  */
-function startBackgroundJob(kind: string, kiro: string, prompt: string): string {
+function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: number): Job | string {
   const job: Job = { id: genId(), kind, status: "running", startedAt: new Date().toISOString() };
   saveJob(job);
 
-  const child = spawn(nodeBinary(), [runnerPath(), job.id, kiro, ...chatArgs(prompt)], {
-    stdio: "ignore",
-    detached: true,
-  });
+  const child = spawn(
+    nodeBinary(),
+    [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)],
+    { stdio: "ignore", detached: true },
+  );
   // spawn reports EAGAIN/EMFILE/EACCES asynchronously. Without a listener that
   // event is fatal, and it would fire after dispatch() had already returned --
   // outside its try/catch, so the command died with a stack trace.
@@ -105,13 +107,9 @@ function startBackgroundJob(kind: string, kiro: string, prompt: string): string 
   child.unref();
 
   if (child.pid === undefined) {
-    saveJob({
-      ...job,
-      status: "failed",
-      finishedAt: new Date().toISOString(),
-      result: "ERROR: could not spawn the Kiro runner process.",
-    });
-    return JSON.stringify({ jobId: job.id, status: "failed" });
+    const detail = "ERROR: could not spawn the Kiro runner process.";
+    saveJob({ ...job, status: "failed", finishedAt: new Date().toISOString(), result: detail });
+    return detail;
   }
 
   // The runner is its own process group leader, so cancel can signal the group.
@@ -127,35 +125,40 @@ function startBackgroundJob(kind: string, kiro: string, prompt: string): string 
     }
     return `ERROR: started the Kiro runner but could not record it, so it was stopped: ${(e as Error).message}`;
   }
-  return JSON.stringify({ jobId: job.id, status: "started" });
+  return job;
 }
 
-function runForeground(kiro: string, prompt: string): string {
-  try {
-    // execFile, not execSync: the prompt is never handed to a shell, so
-    // $(...), backticks and quotes in it cannot be interpreted as syntax.
-    return execFileSync(kiro, chatArgs(prompt), {
-      encoding: "utf-8",
-      timeout: foregroundTimeoutMs(),
-      // Without this the timeout is advisory: execFileSync sends SIGTERM and
-      // then goes on waiting, so a child that ignores it blocks indefinitely.
-      killSignal: "SIGKILL",
-      maxBuffer: maxOutputBytes(),
-    });
-  } catch (e: unknown) {
-    const err = e as { stdout?: string; stderr?: string; message?: string };
-    // kiro may have printed a complete review and still exited non-zero (or hit
-    // the timeout). Returning only the error would throw that work away.
-    const body = typeof err.stdout === "string" ? err.stdout : "";
-    const reason = (typeof err.stderr === "string" ? err.stderr : "").trim() || err.message || "kiro-cli failed";
-    return body ? `${body}\nERROR: ${reason}` : `ERROR: ${reason}`;
+/** Slack over the runner's own budget before this side stops waiting. */
+const FOREGROUND_WAIT_SLACK_MS = 10_000;
+const FOREGROUND_POLL_MS = 200;
+
+function awaitResult(id: string, timeoutMs: number): string {
+  const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
+  for (;;) {
+    const job = loadJob(id);
+    if (job && job.status !== "running") {
+      const body = job.result ?? "";
+      if (job.status === "completed") return body || "No output was recorded.";
+      // Keep whatever Kiro produced -- it may be a complete review -- but do
+      // not let a failed run read like a successful one.
+      const detail = `ERROR: kiro-cli did not complete: job ${id} is ${job.status}.`;
+      return body ? `${body}\n\n${detail}` : detail;
+    }
+    if (Date.now() >= deadline) {
+      return `ERROR: Kiro did not finish within ${timeoutMs}ms. It is recorded as job ${id}; check /kiro-cli:status.`;
+    }
+    sleepSync(FOREGROUND_POLL_MS);
   }
 }
 
 function runKiro(kind: string, prompt: string, background: boolean): string {
   const kiro = findKiro();
   if (!kiro) return NOT_INSTALLED;
-  return background ? startBackgroundJob(kind, kiro, prompt) : runForeground(kiro, prompt);
+  const timeoutMs = background ? backgroundTimeoutMs() : foregroundTimeoutMs();
+  const started = startRunner(kind, kiro, prompt, timeoutMs);
+  if (typeof started === "string") return started;
+  if (background) return JSON.stringify({ jobId: started.id, status: "started" });
+  return awaitResult(started.id, timeoutMs);
 }
 
 // --- Commands ---
@@ -173,7 +176,12 @@ export function setup(args: string[]): string {
   };
   if (kiro) {
     try {
-      info.version = execFileSync(kiro, ["--version"], { encoding: "utf-8", timeout: 30_000 }).trim();
+      info.version = execFileSync(kiro, ["--version"], {
+        encoding: "utf-8",
+        timeout: 30_000,
+        // Without this the timeout only sends SIGTERM and then keeps waiting.
+        killSignal: "SIGKILL",
+      }).trim();
       info.runnable = true;
     } catch (e) {
       const err = e as { stderr?: string; message?: string };
@@ -200,16 +208,33 @@ export function rescue(args: string[]): string {
   return runKiro("rescue", buildRescuePrompt(args), hasFlag(args, "--background"));
 }
 
+/**
+ * Status is about progress, not output. A recorded result can be megabytes, and
+ * ten of them would go straight into the conversation, so large bodies are
+ * reported by size and left to /kiro-cli:result. Short ones stay inline: a
+ * failure explanation is usually a single line, and hiding it behind another
+ * command would be worse than useless.
+ */
+const STATUS_INLINE_RESULT_BYTES = 2_000;
+
+function summarize(job: Job): Record<string, unknown> {
+  if (job.result === undefined) return { ...job };
+  const resultBytes = Buffer.byteLength(job.result);
+  if (resultBytes <= STATUS_INLINE_RESULT_BYTES) return { ...job, resultBytes };
+  const { result, ...rest } = job;
+  return { ...rest, resultBytes };
+}
+
 export function status(args: string[]): string {
   const id = args[0];
   if (id) {
     const job = loadJob(id);
     if (!job) return `No job found with ID: ${id}`;
-    return JSON.stringify(job, null, 2);
+    return JSON.stringify(summarize(job), null, 2);
   }
   const jobs = listJobs();
   if (jobs.length === 0) return "No Kiro jobs found.";
-  return JSON.stringify(jobs.slice(0, 10), null, 2);
+  return JSON.stringify(jobs.slice(0, 10).map(summarize), null, 2);
 }
 
 export function result(args: string[]): string {

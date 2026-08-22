@@ -88,6 +88,11 @@ keeps running -- and still records its result -- even if the Claude Code session
 that started it goes away. Track it with `/kiro-cli:status` and read it with
 `/kiro-cli:result`.
 
+Foreground runs go through the same supervisor and are recorded the same way,
+so their output is retrievable with `/kiro-cli:result` afterwards. `/kiro-cli:status`
+lists progress only: a result larger than 2 KB is reported by size rather than
+inlined, since a full review would otherwise be printed twice.
+
 ### `/kiro-cli:rescue`
 
 Hands a task to Kiro CLI.
@@ -133,7 +138,7 @@ TypeScript source is in `src/`, compiled output goes to `plugins/kiro-cli/script
 | `src/kiro-companion.ts` | CLI entry point and slash-command implementations |
 | `src/kiro.ts` | Locating `kiro-cli`, building its argv, timeouts |
 | `src/jobs.ts` | Background job records: storage, validation, liveness |
-| `src/kiro-runner.ts` | Detached supervisor that owns a background Kiro run |
+| `src/kiro-runner.ts` | Detached supervisor that owns a Kiro run and its process group |
 
 **Note**: The compiled output in `plugins/kiro-cli/scripts/lib/` is committed to the repository so that Claude Code can run the plugin without a build step on the user's machine. After modifying any TypeScript source, run `pnpm build` and commit the regenerated files.
 

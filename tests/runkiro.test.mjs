@@ -288,7 +288,9 @@ test("a foreground run that exits non-zero still returns what kiro printed", () 
   writeFileSync(kiro, '#!/bin/sh\necho "THE ENTIRE REVIEW BODY"\necho "rate limited" >&2\nexit 1\n', { mode: 0o755 });
   const r = run(["review"], { KIRO_CLI_PATH: kiro });
   assert.match(r.stdout, /THE ENTIRE REVIEW BODY/);
-  assert.match(r.stdout, /ERROR: rate limited/);
+  assert.match(r.stdout, /rate limited/);
+  // And the failure itself is still signalled rather than reading as a success.
+  assert.match(r.stdout, /ERROR: kiro-cli did not complete/);
 });
 
 test("multi-byte output survives pipe-read boundaries intact", async () => {
@@ -445,10 +447,12 @@ test("a runner that cannot be spawned is recorded as failed, not left crashing",
   // trace, after the JSON had already been printed.
   assert.equal(r.status, 0, `exited ${r.status}: ${r.stderr}`);
   assert.doesNotMatch(r.stderr, /ENOENT/);
-  const { jobId } = JSON.parse(r.stdout);
-  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
+  // A failure is reported as an error, not as a job the user can go and watch.
+  assert.match(r.stdout, /^ERROR: /);
+  assert.doesNotMatch(r.stdout, /"status":"started"/);
+  const job = await waitForJob((j) => j.status !== "running", 10_000);
   assert.equal(job.status, "failed");
-  assert.match(job.result, /could not start the Kiro runner/);
+  assert.match(job.result, /(could not start|could not spawn) the Kiro runner/);
 });
 
 test("a symlinked default jobs directory is refused", () => {
@@ -642,4 +646,69 @@ test("an unwritable job store reports an error and starts nothing", async () => 
   // A job that could not be recorded must not be running behind our back.
   await new Promise((res) => setTimeout(res, 2500));
   assert.equal(existsSync(marker), false, "kiro-cli ran for an unrecordable job");
+});
+
+// --- Round-8 regressions ---
+
+test("a foreground timeout takes kiro-cli's descendants with it", async () => {
+  const marker = join(tmpDir, "descendant-finished");
+  const kiro = join(tmpDir, "leaky-stubborn-kiro");
+  // Ignores SIGTERM and leaves a descendant behind, the shape of a build step
+  // still writing to the repository under --trust-all-tools.
+  writeFileSync(
+    kiro,
+    `#!/bin/sh\ntrap '' TERM\n( sleep 6; touch "${marker}" ) &\nsleep 6\n`,
+    { mode: 0o755 }
+  );
+  const started = Date.now();
+  const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "1500" });
+  assert.ok(Date.now() - started < 14_000, "the foreground wait was not bounded");
+  assert.match(r.stdout, /ERROR/);
+  await new Promise((res) => setTimeout(res, 7000));
+  assert.equal(existsSync(marker), false, "a descendant outlived the timeout");
+});
+
+test("setup's version probe is bounded even against a process that ignores SIGTERM", () => {
+  const kiro = join(tmpDir, "hanging-version-kiro");
+  writeFileSync(kiro, "#!/bin/sh\ntrap '' TERM\nsleep 45\n", { mode: 0o755 });
+  const started = Date.now();
+  const r = run(["setup", "--json"], { KIRO_CLI_PATH: kiro });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 40_000, `waited ${elapsed}ms`);
+  const info = JSON.parse(r.stdout);
+  assert.equal(info.installed, true);
+  assert.equal(info.runnable, false);
+});
+
+test("status reports large results by size instead of inlining them", async () => {
+  const kiro = join(tmpDir, "verbose-kiro");
+  writeFileSync(kiro, `#!${process.execPath}\nprocess.stdout.write("y".repeat(40_000));\n`, { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  const listed = JSON.parse(run(["status"]).stdout);
+  assert.equal(listed[0].result, undefined, "status inlined the whole body");
+  assert.ok(listed[0].resultBytes >= 40_000);
+  // The body is still reachable where it belongs.
+  assert.ok(run(["result", jobId]).stdout.length >= 40_000);
+});
+
+test("status keeps a short failure explanation inline", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(
+    join(jobsDir, "orphan2.json"),
+    JSON.stringify({ id: "orphan2", kind: "rescue", status: "running", startedAt: new Date().toISOString(), pid: 4194304 })
+  );
+  const job = JSON.parse(run(["status", "orphan2"]).stdout);
+  assert.equal(job.status, "failed");
+  assert.match(job.result, /without recording a result/);
+});
+
+test("a foreground run is recorded, so its output survives the caller", () => {
+  const kiro = fakeEchoKiro();
+  const out = run(["review"], { KIRO_CLI_PATH: kiro }).stdout;
+  assert.match(out, /^ARG:chat$/m);
+  const listed = JSON.parse(run(["status"]).stdout);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].kind, "review");
+  assert.equal(listed[0].status, "completed");
 });
