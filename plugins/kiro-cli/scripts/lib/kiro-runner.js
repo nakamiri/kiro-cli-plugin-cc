@@ -19,7 +19,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { loadJobRaw, saveJob, saveJobResult } from "./jobs.js";
-import { maxOutputBytes } from "./kiro.js";
+import { flushGraceMs, maxOutputBytes } from "./kiro.js";
 const [jobId, timeoutArg, kiroPath, ...kiroArgs] = process.argv.slice(2);
 if (!jobId || !timeoutArg || !kiroPath) {
     console.error("kiro-runner: usage: kiro-runner.js <jobId> <timeoutMs> <kiroPath> [kiroArgs...]");
@@ -37,7 +37,7 @@ if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
  * then EOF never arrives. Once the process itself has exited, wait only this
  * long for the pipes to drain before recording the result.
  */
-const FLUSH_GRACE_MS = 2_000;
+const FLUSH_GRACE_MS = flushGraceMs();
 const maxBytes = maxOutputBytes();
 let timedOut = false;
 let finalized = false;
@@ -275,6 +275,18 @@ function settle(code, signal) {
         return;
     }
     if (signal) {
+        // SIGTERM and SIGINT reach the child only because somebody signalled this
+        // process group, and `cancel` is the only thing that does -- the timeout
+        // path kills with SIGKILL and is caught above. Which of the two arrives
+        // first is not ordered: this process gets the same signal and records
+        // "cancelled" from its own handler, but if the child's exit event is
+        // dispatched first (which is what happens on macOS, consistently) that
+        // handler never runs, and an explicit cancellation was recorded as a
+        // failure whose transcript blamed a signal the user had sent on purpose.
+        if (signal === "SIGTERM" || signal === "SIGINT") {
+            finalize("cancelled", `${output}\n\n[cancelled]`);
+            return;
+        }
         finalize("failed", `${output}\n\nERROR: kiro-cli was terminated by ${signal}.`);
         return;
     }
