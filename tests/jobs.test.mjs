@@ -183,3 +183,165 @@ test("a pid-less running record is reported as failed once its launch window pas
   assert.match(job.note, /never started/);
   assert.equal(cancel([]), "No running jobs to cancel.");
 });
+
+
+// --- Records that cannot be trusted ---
+//
+// Everything below plants files directly and calls the store. These paths used
+// to be covered by spawning the CLI once per case, which answered the same
+// question about the same on-disk state several hundred milliseconds slower.
+
+const { readJobResult, pruneJobs } = await import("../plugins/kiro-cli/scripts/lib/jobs.js");
+const { dispatch } = await import("../plugins/kiro-cli/scripts/lib/kiro-companion.js");
+const { mkdirSync, writeFileSync } = await import("node:fs");
+
+/** Writes a file into the jobs directory verbatim, valid or not. */
+function plantFile(name, contents) {
+  mkdirSync(tmpJobsDir, { recursive: true });
+  writeFileSync(join(tmpJobsDir, name), contents);
+}
+
+const GOOD = { id: "kiro-good0001-aa", kind: "review", status: "completed", startedAt: "2026-01-02T00:00:00.000Z", finishedAt: "2026-01-02T00:00:01.000Z", resultBytes: 2 };
+
+test("a record that cannot be trusted is ignored, and does not take the listing with it", () => {
+  // One malformed file used to raise out of every command that read the store.
+  const unusable = {
+    "truncated.json": '{"id":"truncated","kind":"rev',
+    "foreign.json": '{"unrelated":true}',
+    "array.json": "[1,2,3]",
+    // saveJob writes <id>.json, so a record naming something else could never be
+    // updated through its own id: it read as running for ever while a second,
+    // cancelled record accumulated alongside it.
+    "kiro-mismatch-aa.json": JSON.stringify({ ...GOOD, id: "kiro-somethingelse-aa" }),
+    // Each of these fields is used for ordering, pruning or accounting, and a
+    // value of the wrong type silently poisoned all three.
+    "kiro-badstart-aa.json": JSON.stringify({ ...GOOD, id: "kiro-badstart-aa", startedAt: "whenever" }),
+    "kiro-badfinis-aa.json": JSON.stringify({ ...GOOD, id: "kiro-badfinis-aa", finishedAt: "soon" }),
+    "kiro-badbytes-aa.json": JSON.stringify({ ...GOOD, id: "kiro-badbytes-aa", resultBytes: "9999" }),
+    "kiro-badbudge-aa.json": JSON.stringify({ ...GOOD, id: "kiro-badbudge-aa", timeoutMs: "60000" }),
+  };
+  for (const [name, contents] of Object.entries(unusable)) plantFile(name, contents);
+  plantFile(`${GOOD.id}.json`, JSON.stringify(GOOD));
+  plantFile(`${GOOD.id}.out`, "ok");
+
+  assert.deepEqual(listJobs().map((j) => j.id), [GOOD.id]);
+  assert.equal(result([]), "ok");
+  assert.equal(cancel([]), "No running jobs to cancel.");
+  for (const name of Object.keys(unusable)) {
+    const id = name.slice(0, -".json".length);
+    assert.equal(loadJob(id), null, `${name} was accepted`);
+  }
+});
+
+test("an unreadable record is not reported as a missing one", async () => {
+  // A directory where the record should be: readFileSync raises EISDIR, which
+  // is emphatically not "this job does not exist".
+  mkdirSync(join(tmpJobsDir, "kiro-unread01-aa.json"), { recursive: true });
+  assert.throws(() => loadJob("kiro-unread01-aa"), /EISDIR/);
+  // Slash commands render stdout, so dispatch turns it into a line the user can
+  // see rather than a stack trace on stderr.
+  const out = await dispatch("status", ["kiro-unread01-aa"]);
+  assert.match(out, /^ERROR: /);
+  assert.doesNotMatch(out, /No job found/);
+  // And it does not break the commands that read the whole store.
+  saveJob({ id: "kiro-fine0001-aa", kind: "review", status: "completed", startedAt: NOW(), finishedAt: NOW() });
+  assert.deepEqual(JSON.parse(status([])).map((j) => j.id), ["kiro-fine0001-aa"]);
+  assert.equal(cancel([]), "No running jobs to cancel.");
+  // Housekeeping must not be able to fail a job either.
+  assert.doesNotThrow(() => pruneJobs());
+});
+
+// --- The transcript, which lives beside the record ---
+
+test("status reports a transcript by size; result is what hands the body over", () => {
+  const big = "R".repeat(40_000);
+  saveJob({ id: "kiro-big00001-aa", kind: "review", status: "completed", startedAt: NOW(), finishedAt: NOW() });
+  saveJob({ id: "kiro-big00001-aa", kind: "review", status: "completed", startedAt: NOW(), finishedAt: NOW(), resultBytes: saveJobResult("kiro-big00001-aa", big) });
+  const job = JSON.parse(status(["kiro-big00001-aa"]));
+  assert.equal(job.resultBytes, 40_000);
+  assert.equal(job.result, undefined, "status inlined the transcript");
+  assert.equal(result(["kiro-big00001-aa"]), big);
+});
+
+test("a pre-split record still gives up its transcript, without re-emitting it", () => {
+  // Before the split the transcript lived inside the metadata. Without the
+  // fallback the commands reported "No result stored." with the body right there.
+  plantFile("kiro-inline01-aa.json", JSON.stringify({
+    id: "kiro-inline01-aa", kind: "review", status: "completed",
+    startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:00:01.000Z",
+    result: "the old review body",
+  }));
+  assert.equal(readJobResult("kiro-inline01-aa"), "the old review body");
+  assert.match(result(["kiro-inline01-aa"]), /the old review body/);
+  const listed = JSON.parse(status([]))[0];
+  assert.equal(listed.result, undefined, "status re-emitted an inline transcript");
+  assert.equal(listed.resultBytes, Buffer.byteLength("the old review body"));
+});
+
+test("an unreadable transcript is reported, not called an absence of output", () => {
+  // Swallowing the read error made this indistinguishable from a missing
+  // transcript, so a completed job reported "No output was recorded." while its
+  // own status advertised the bytes.
+  saveJob({ id: "kiro-lostout1-aa", kind: "review", status: "completed", startedAt: NOW(), finishedAt: NOW(), resultBytes: 1234 });
+  mkdirSync(join(tmpJobsDir, "kiro-lostout1-aa.out"), { recursive: true });
+  const out = result(["kiro-lostout1-aa"]);
+  assert.match(out, /1234/);
+  assert.doesNotMatch(out, /No output was recorded/);
+});
+
+test("a run that genuinely printed nothing says so, from either path", () => {
+  saveJob({ id: "kiro-silent01-aa", kind: "review", status: "completed", startedAt: NOW(), finishedAt: NOW(), resultBytes: saveJobResult("kiro-silent01-aa", "") });
+  assert.equal(result(["kiro-silent01-aa"]), "No output was recorded.");
+  assert.equal(result([]), "No output was recorded.");
+});
+
+// --- Which run is "the latest" ---
+
+test("the latest run is the one that finished last, not the one that started last", () => {
+  // Two overlapping background jobs. Ordering by startedAt handed back the
+  // older transcript, and pruning deleted the newer one.
+  saveJob({ id: "kiro-startfir-aa", kind: "review", status: "completed", startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:10:00.000Z", resultBytes: saveJobResult("kiro-startfir-aa", "finished last") });
+  saveJob({ id: "kiro-startsec-aa", kind: "review", status: "completed", startedAt: "2026-01-01T00:05:00.000Z", finishedAt: "2026-01-01T00:06:00.000Z", resultBytes: saveJobResult("kiro-startsec-aa", "finished first") });
+  assert.match(result([]), /finished last/);
+});
+
+test("a stale running record does not shadow later results", () => {
+  // reconcile must not synthesize finishedAt for a record it fails: doing so
+  // made one stale record look like the most recently finished job on every
+  // read, hiding every genuine result for the whole retention window.
+  saveJob({ id: "kiro-stale001-aa", kind: "rescue", status: "running", startedAt: "2026-01-01T00:00:00.000Z" });
+  saveJob({ id: "kiro-real0001-aa", kind: "review", status: "completed", startedAt: NOW(), finishedAt: NOW(), resultBytes: saveJobResult("kiro-real0001-aa", "the actual review") });
+  assert.match(result([]), /the actual review/);
+});
+
+// --- cancel, when there is nothing it can do ---
+
+test("cancel refuses a record that is not running, and does not claim otherwise", () => {
+  // A live pid that is plainly not our runner has the shape of a pre-reboot
+  // record whose pid has been recycled. Claiming a cancellation we did not
+  // perform is the worst outcome: Kiro would keep working under
+  // --trust-all-tools while the user was told it had stopped, and its result
+  // would then be discarded when the runner found a terminal record.
+  // That nothing is actually signalled is a property of a process, and is
+  // asserted in runkiro.test.mjs against a child's own pid.
+  const cases = {
+    "kiro-finished1-aa": { status: "completed", pid: process.pid, expect: /already completed; nothing to cancel/ },
+    "kiro-foreign01-aa": { status: "running", pid: process.pid, expect: /already failed; nothing to cancel/ },
+    "kiro-deadpid01-aa": { status: "running", pid: 4194304, expect: /already failed; nothing to cancel/ },
+  };
+  for (const [id, { status: st, pid }] of Object.entries(cases)) {
+    saveJob({ id, kind: "review", status: st, startedAt: NOW(), pid });
+  }
+  for (const [id, { expect }] of Object.entries(cases)) {
+    const out = cancel([id]);
+    assert.match(out, expect, `${id}: ${out}`);
+    assert.doesNotMatch(out, /Cancelled job/, `${id} claimed a cancellation it did not perform`);
+  }
+  assert.equal(cancel([]), "No running jobs to cancel.");
+});
+
+test("an empty argument is treated as no argument at all", () => {
+  assert.equal(status([""]), "No Kiro jobs found.");
+  assert.equal(result([""]), "No finished jobs found.");
+  assert.equal(cancel([""]), "No running jobs to cancel.");
+});

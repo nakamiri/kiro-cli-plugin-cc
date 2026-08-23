@@ -2,7 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { readSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type Job, type PidVerdict, classifyPid, isPidAlive, listJobs, loadJob, loadJobRaw, pruneJobs, readJobResult, saveJob } from "./jobs.js";
-import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
+import { backgroundTimeoutMs, cancelSettleMs, chatArgs, findKiro, foregroundReconcileMs, foregroundTimeoutMs, nodeBinary, stdinStallMs, trustAllTools, versionProbeTimeoutMs } from "./kiro.js";
 
 export type { Job };
 export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidInfo, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
@@ -121,7 +121,6 @@ export function wantsBackground(args: string[]): boolean {
  * A signalled runner records its own outcome, including the output it had
  * captured. Give it a moment to do so rather than overwriting it from here.
  */
-const CANCEL_SETTLE_MS = 2_000;
 const CANCEL_POLL_MS = 50;
 
 /** The command surface is synchronous, so the wait has to be too. */
@@ -130,7 +129,7 @@ function sleepSync(ms: number): void {
 }
 
 function awaitRunnerRecord(id: string): Job | null {
-  const deadline = Date.now() + CANCEL_SETTLE_MS;
+  const deadline = Date.now() + cancelSettleMs();
   let last: Job | null = null;
   for (;;) {
     try {
@@ -276,7 +275,6 @@ const FOREGROUND_POLL_MS = 200;
  * happened. Reconciling on a schedule closes that without forking ps five times
  * a second on the platforms where the identity probe costs a process.
  */
-const FOREGROUND_RECONCILE_MS = 5_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -291,7 +289,8 @@ function sleep(ms: number): Promise<void> {
  */
 async function awaitResult(id: string, timeoutMs: number): Promise<string> {
   const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
-  let nextReconcile = Date.now() + FOREGROUND_RECONCILE_MS;
+  const reconcileEvery = foregroundReconcileMs();
+  let nextReconcile = Date.now() + reconcileEvery;
   for (;;) {
     // Raw: the reconciling read runs a full identity probe, which forks ps on
     // every platform without /proc -- around 1500 times over a long review.
@@ -302,7 +301,7 @@ async function awaitResult(id: string, timeoutMs: number): Promise<string> {
       if (job && job.status === "running") {
         const pidIsGone = job.pid !== undefined && !isPidAlive(job.pid);
         if (pidIsGone || Date.now() >= nextReconcile) {
-          nextReconcile = Date.now() + FOREGROUND_RECONCILE_MS;
+          nextReconcile = Date.now() + reconcileEvery;
           job = loadJob(id);
         }
       }
@@ -370,7 +369,7 @@ export function setup(args: string[]): string {
     try {
       info.version = execFileSync(kiro, ["--version"], {
         encoding: "utf-8",
-        timeout: 30_000,
+        timeout: versionProbeTimeoutMs(),
         // Without this the timeout only sends SIGTERM and then keeps waiting.
         killSignal: "SIGKILL",
         // execFileSync echoes the child's stderr to ours unless stdio is given,
@@ -674,7 +673,6 @@ export async function dispatch(command: string | undefined, args: string[]): Pro
 }
 
 const ARGS_STDIN_FLAG = "--args-stdin";
-const STDIN_EAGAIN_BUDGET_MS = 5_000;
 
 /** Reads fd 0 to EOF, tolerating a non-blocking pipe. */
 function readAllStdin(): string {
@@ -682,7 +680,8 @@ function readAllStdin(): string {
   const buf = Buffer.alloc(64 * 1024);
   // Budgets the current stall, not the whole read: a writer that pauses part way
   // through a long body would otherwise lose everything already received.
-  let deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
+  const stallBudget = stdinStallMs();
+  let deadline = Date.now() + stallBudget;
   for (;;) {
     let n: number;
     try {
@@ -700,7 +699,7 @@ function readAllStdin(): string {
     }
     if (n === 0) break;
     chunks.push(Buffer.from(buf.subarray(0, n)));
-    deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
+    deadline = Date.now() + stallBudget;
   }
   return Buffer.concat(chunks).toString("utf-8");
 }
