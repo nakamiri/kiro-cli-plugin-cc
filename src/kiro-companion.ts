@@ -5,7 +5,7 @@ import { type Job, type PidVerdict, classifyPid, isPidAlive, listJobs, loadJob, 
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
 
 export type { Job };
-export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidCommandLine, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
+export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidArgv, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
 export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";

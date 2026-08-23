@@ -2123,29 +2123,42 @@ test("cancelling a live runner still works after the rewrite", async () => {
 
 // --- Round-36 regressions ---
 
-test("unreachable bytes are weighed against everything on disk", () => {
+test("the newest run is retained unconditionally, and not charged", () => {
   const kiro = fakeEchoKiro();
   mkdirSync(jobsDir, { recursive: true });
-  // One large newest transcript, exempt from retention but still occupying the
-  // disk, plus young orphans. Testing only the charged bytes left 160 KB in a
-  // 64 KB store and deleted nothing, because the charged total was zero.
+  // A single transcript larger than the whole budget. The floor keeps it, and
+  // charging it would exhaust the budget on its own -- which is why the
+  // unreachable-file sweep is judged on charged bytes rather than on everything
+  // that happens to be on disk.
   const ts = new Date(Date.now() - 3000).toISOString();
   writeFileSync(join(jobsDir, "kiro-bigone-aa.json"), JSON.stringify({
     id: "kiro-bigone-aa", kind: "review", status: "completed",
     startedAt: ts, finishedAt: ts, resultBytes: 100 * 1024,
   }));
   writeFileSync(join(jobsDir, "kiro-bigone-aa.out"), "b".repeat(100 * 1024));
-  for (const n of ["p", "q", "r"]) {
-    writeFileSync(join(jobsDir, `kiro-orphbig${n}-aa.out`), "o".repeat(20 * 1024));
-  }
+  writeFileSync(join(jobsDir, "kiro-orphtiny-aa.out"), "o".repeat(10));
   run(["review"], {
     KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "64000",
     KIRO_PLUGIN_MAX_JOBS: "50", KIRO_PLUGIN_JOB_TTL_MS: "3600000",
   });
+  assert.ok(readdirSync(jobsDir).includes("kiro-bigone-aa.json"), "the newest run was pruned");
+  assert.ok(readdirSync(jobsDir).includes("kiro-bigone-aa.out"), "the newest transcript was pruned");
+  // Nothing charged is over budget, so the age grace still protects this.
+  assert.ok(readdirSync(jobsDir).includes("kiro-orphtiny-aa.out"), "a young orphan was swept");
+});
+
+test("unreachable bytes go once the charged total is over budget", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  for (const n of ["p", "q", "r"]) {
+    writeFileSync(join(jobsDir, `kiro-orphbig${n}-aa.out`), "o".repeat(20 * 1024));
+  }
+  run(["review"], {
+    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000",
+    KIRO_PLUGIN_MAX_JOBS: "50", KIRO_PLUGIN_JOB_TTL_MS: "3600000",
+  });
   const orphans = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-orphbig"));
   assert.deepEqual(orphans, [], `unreachable bytes retained over budget: ${orphans}`);
-  // The record itself is the newest survivor and is kept regardless.
-  assert.ok(readdirSync(jobsDir).includes("kiro-bigone-aa.json"));
 });
 
 test("a cancelled run's status advertises the output it kept", async () => {
@@ -2161,4 +2174,39 @@ test("a cancelled run's status advertises the output it kept", async () => {
   assert.match(body, /the partial review/);
   // status said there was no output while result returned the whole transcript.
   assert.ok(job.resultBytes > 0, `status advertises no output: ${JSON.stringify(job)}`);
+});
+
+// --- Round-37 regressions ---
+
+test("a prompt mentioning another job's id does not impersonate it", async () => {
+  const kiro = fakeSlowKiro(20);
+  // A real runner for one job, whose prompt names a second job.
+  const other = "kiro-victim-aa";
+  const { jobId } = JSON.parse(
+    run(["rescue", "--background", `look at job ${other} too`], { KIRO_CLI_PATH: kiro }).stdout
+  );
+  const mine = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+
+  // A record for the second job pointing at the first job's runner: the shape a
+  // recycled pid produces. Matching the id anywhere in the command line read
+  // this as "ours", so the job stayed running for ever and cancel would have
+  // signalled the other job's process group.
+  writeFileSync(join(jobsDir, `${other}.json`), JSON.stringify({
+    id: other, kind: "review", status: "running",
+    startedAt: new Date().toISOString(), pid: mine.pid,
+  }));
+  assert.equal(JSON.parse(run(["status", other]).stdout).status, "failed");
+  const out = run(["cancel", other]).stdout;
+  assert.doesNotMatch(out, new RegExp(`^Cancelled job ${other}`));
+  // And the real job is untouched.
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "running");
+  run(["cancel", jobId]);
+});
+
+test("a genuine runner is still recognised", async () => {
+  const kiro = fakeSlowKiro(20);
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "running");
+  assert.match(run(["cancel", jobId]).stdout, new RegExp(`Cancelled job ${jobId}`));
 });

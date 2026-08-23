@@ -220,15 +220,17 @@ export function isPidAlive(pid) {
     }
 }
 /**
- * Best-effort command line for `pid`, or null when it cannot be determined.
- * Used to confirm a recorded pid is still our runner and not a recycled one
- * before any signal is sent.
+ * Best-effort argv for `pid`, or null when it cannot be determined. An empty
+ * array means the process is there but has no command line -- a zombie or a
+ * kernel thread. Kept as an array rather than a string because the runner has
+ * to be recognised by position: its prompt is one of these entries, and a
+ * prompt that merely mentions another job's id would otherwise match it.
  */
-export function pidCommandLine(pid) {
+export function pidArgv(pid) {
     if (!Number.isInteger(pid) || pid <= 0)
         return null;
     try {
-        return readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter(Boolean).join(" ");
+        return readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter(Boolean);
     }
     catch {
         /* not Linux, or the process is gone */
@@ -236,13 +238,17 @@ export function pidCommandLine(pid) {
     try {
         // -ww: BSD and macOS truncate to the terminal width when stdout is not a
         // tty, which would drop the job id and defeat the check below.
-        return execFileSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], {
+        const out = execFileSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], {
             encoding: "utf-8",
             timeout: 5_000,
             // Without this the timeout only sends SIGTERM and then keeps waiting.
             killSignal: "SIGKILL",
             stdio: ["ignore", "pipe", "ignore"],
         }).trim();
+        // ps gives one string, so argument boundaries are approximated by
+        // whitespace. That is enough here: the two entries this is matched on -- the
+        // runner's path and the job id -- are adjacent and contain no spaces.
+        return out === "" ? [] : out.split(/\s+/);
     }
     catch {
         return null;
@@ -260,9 +266,24 @@ function isZombie(pid) {
         return false;
     }
 }
+/**
+ * Whether this argv is our runner for `jobId`. The runner is invoked as
+ * `node <...>/kiro-runner.js <jobId> <timeoutMs> <kiro> chat ... <prompt>`, so
+ * the id has to sit immediately after the script. Searching the whole command
+ * line for it instead meant a runner whose prompt happened to mention another
+ * job's id was taken for that job -- and on a recycled pid that had cancel
+ * signalling the wrong process group while reporting the wrong job stopped.
+ */
+function isRunnerFor(argv, jobId) {
+    for (let i = 0; i < argv.length - 1; i++) {
+        if (argv[i].endsWith("kiro-runner.js") && argv[i + 1] === jobId)
+            return true;
+    }
+    return false;
+}
 export function classifyPid(pid, jobId) {
-    const cmd = pidCommandLine(pid);
-    if (cmd === null || cmd.trim() === "") {
+    const argv = pidArgv(pid);
+    if (argv === null || argv.length === 0) {
         // An empty command line is not somebody else's process: calling it
         // "foreign" asserted a recycled pid that was never observed. A zombie is
         // still definitively finished, though, and saying so is what lets a killed
@@ -271,7 +292,7 @@ export function classifyPid(pid, jobId) {
             return "dead";
         return "unknown";
     }
-    return cmd.includes("kiro-runner") && cmd.includes(jobId) ? "ours" : "foreign";
+    return isRunnerFor(argv, jobId) ? "ours" : "foreign";
 }
 /**
  * Longest a single writeAtomic could plausibly be in flight. Past this a
@@ -615,9 +636,6 @@ export function pruneJobs() {
     // budget.
     const byteBudget = maxRetainedJobBytes();
     let kept = 0;
-    // The exempt newest survivor is not charged against retention decisions, but
-    // it is still bytes on disk, so the unreachable-file test below has to see it.
-    let exemptBytes = 0;
     let keptAny = false;
     for (const job of terminal) {
         if (doomed.has(job.id))
@@ -631,7 +649,6 @@ export function pruneJobs() {
         // anyone had read it.
         if (!keptAny) {
             keptAny = true;
-            exemptBytes = transcriptBytes(dir, job);
             continue;
         }
         const bytes = transcriptBytes(dir, job);
@@ -673,10 +690,12 @@ export function pruneJobs() {
         }
         catch { /* gone */ }
     }
-    // Against everything retained, the exempt record included: testing `kept`
-    // alone left unreachable bytes on a store well over its budget -- one 100 KB
-    // newest transcript plus three 20 KB orphans deleted nothing at all.
-    if (kept + exemptBytes + strayBytes > byteBudget) {
+    // Against the charged bytes only. The newest run is retained unconditionally
+    // and not charged, so a single large transcript can put the store over the
+    // budget on its own -- that is the floor working as intended, not a signal to
+    // start deleting. Including it here made the sweep fire on a store whose
+    // retention was entirely within budget, which defeated the age grace above.
+    if (kept + strayBytes > byteBudget) {
         for (const name of strays) {
             try {
                 unlinkSync(join(dir, name));
