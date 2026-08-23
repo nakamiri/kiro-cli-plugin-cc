@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { readSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { type Job, classifyPid, isPidAlive, listJobs, loadJob, loadJobRaw, pruneJobs, readJobResult, saveJob } from "./jobs.js";
+import { type Job, type PidVerdict, classifyPid, isPidAlive, listJobs, loadJob, loadJobRaw, pruneJobs, readJobResult, saveJob } from "./jobs.js";
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
 
 export type { Job };
@@ -442,92 +442,91 @@ export function cancel(args: string[]): string {
     // leave Kiro working while the user believed it had stopped.
     return `Could not cancel job ${job.id}: it is still starting and has no runner recorded yet. Try again in a moment.`;
   }
-  let signalled = false;
-  let signalError = "";
-  if (isPidAlive(job.pid)) {
-    // Classified afresh rather than trusting the verdict reconcile reached: only
-    // "ours" may be signalled. Reconciliation accepts "unknown" because it must,
-    // and the probe can be flaky under load, so a recycled pid that slipped
-    // through there would otherwise have its whole process group signalled here.
-    const verdict = classifyPid(job.pid, job.id);
-    if (verdict === "dead") {
-      // Finished, just not reaped. Nothing to signal; fall through and record.
-    } else if (verdict === "unknown") {
-      // Signalling an unidentifiable pid could hit anything, but recording a
-      // cancellation we did not perform is worse: Kiro would keep working under
-      // --trust-all-tools while the user was told it had stopped, and its
-      // result would be discarded when the runner found a terminal record.
-      return (
-        `Could not cancel job ${job.id}: its runner (pid ${job.pid}) cannot be identified on ` +
-        `this platform, so no signal was sent and the job is still running.`
-      );
-    } else if (verdict === "foreign") {
-      return (
-        `Could not cancel job ${job.id}: pid ${job.pid} now belongs to another process, ` +
-        `so no signal was sent.`
-      );
-    } else {
-      try {
-        // Negated pid: the runner leads the group, so kiro-cli stops with it.
-        process.kill(-job.pid, "SIGTERM");
-        signalled = true;
-      } catch {
-        try {
-          process.kill(job.pid, "SIGTERM");
-          signalled = true;
-        } catch (e) {
-          // EPERM, for instance: a runner belonging to another user, which
-          // isPidAlive reports as alive. Not something to paper over.
-          signalError = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
-        }
-      }
-    }
+
+  const pid = job.pid;
+
+  /**
+   * What the pid is right now. "gone" and "dead" both mean the runner is no
+   * longer doing anything -- the second is a zombie, which isPidAlive still
+   * reports as alive and which in a container is the usual state of a runner
+   * that was just killed. They are grouped with "foreign" throughout: in none
+   * of the three is there anything left to signal.
+   */
+  const state = (): PidVerdict | "gone" => (isPidAlive(pid) ? classifyPid(pid, job.id) : "gone");
+  const finished = (v: PidVerdict | "gone"): boolean => v === "gone" || v === "dead" || v === "foreign";
+
+  const before = state();
+  if (before === "unknown") {
+    // Signalling an unidentifiable pid could hit anything, but recording a
+    // cancellation we did not perform is worse: Kiro would keep working under
+    // --trust-all-tools while the user was told it had stopped, and its result
+    // would be discarded when the runner found a terminal record.
+    return (
+      `Could not cancel job ${job.id}: its runner (pid ${pid}) cannot be identified on ` +
+      `this platform, so no signal was sent and the job is still running.`
+    );
   }
 
-  if (signalled) {
+  if (before === "ours") {
+    // Negated pid: the runner leads the group, so kiro-cli stops with it.
+    let signalError = "";
+    let signalled = false;
+    for (const target of [-pid, pid]) {
+      try {
+        process.kill(target, "SIGTERM");
+        signalled = true;
+        break;
+      } catch (e) {
+        // EPERM, for instance: a runner belonging to another user, which
+        // isPidAlive reports as alive. Not something to paper over.
+        signalError = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+      }
+    }
+    if (!signalled) {
+      return (
+        `Could not cancel job ${job.id}: signalling its runner (pid ${pid}) was refused` +
+        `${signalError ? ` (${signalError})` : ""}; it is still running.`
+      );
+    }
+
+    // The runner records its own outcome, keeping the output captured so far.
     let settled = awaitRunnerRecord(job.id);
-    // The runner got there first and kept the partial output; leave it alone.
     if (settled && settled.status !== "running") {
       return `Cancelled job ${job.id} (recorded as ${settled.status})`;
     }
-    // No terminal record inside the settle window. Reporting success now would
-    // be the very thing the rest of this function refuses to do, so escalate
-    // and then check, rather than assume the SIGTERM landed.
-    const alive = isPidAlive(job.pid);
-    const after = alive ? classifyPid(job.pid, job.id) : "gone";
-    if (after === "unknown") {
-      // The probe failed this time round -- it forks ps on platforms without
-      // /proc and can lose under load. Unverified is not cancelled.
-      return (
-        `Could not cancel job ${job.id}: its runner (pid ${job.pid}) could not be verified after ` +
-        `the signal, so nothing was recorded; it may still be running.`
-      );
-    }
+
+    // No terminal record inside the settle window, so do not assume the SIGTERM
+    // landed: escalate and check.
+    const after = state();
     if (after === "ours") {
-      try { process.kill(-job.pid, "SIGKILL"); } catch {
-        try { process.kill(job.pid, "SIGKILL"); } catch { /* already dead */ }
+      for (const target of [-pid, pid]) {
+        try {
+          process.kill(target, "SIGKILL");
+          break;
+        } catch {
+          /* try the narrower target, then give up */
+        }
       }
       settled = awaitRunnerRecord(job.id);
       if (settled && settled.status !== "running") {
         return `Cancelled job ${job.id} (recorded as ${settled.status})`;
       }
-      const final = isPidAlive(job.pid) ? classifyPid(job.pid, job.id) : "gone";
-      if (final !== "gone" && final !== "foreign") {
+      if (!finished(state())) {
         return (
-          `Could not cancel job ${job.id}: its runner (pid ${job.pid}) is still alive after ` +
+          `Could not cancel job ${job.id}: its runner (pid ${pid}) is still alive after ` +
           `SIGTERM and SIGKILL. The job is left running.`
         );
       }
+    } else if (after === "unknown") {
+      // The probe failed this time round -- it forks ps on platforms without
+      // /proc and can lose under load. Unverified is not cancelled.
+      return (
+        `Could not cancel job ${job.id}: its runner (pid ${pid}) could not be verified after ` +
+        `the signal, so nothing was recorded; it may still be running.`
+      );
     }
-  } else if (isPidAlive(job.pid)) {
-    // We meant to signal it and could not. Recording a cancellation anyway
-    // would leave Kiro working under --trust-all-tools while the user believed
-    // it had stopped, and its result would then be discarded.
-    return (
-      `Could not cancel job ${job.id}: signalling its runner (pid ${job.pid}) was refused` +
-      `${signalError ? ` (${signalError})` : ""}; it is still running.`
-    );
   }
+
   // Signalled but not yet recorded, or the runner is already gone: record it
   // here, preserving whatever the stored record holds.
   const base = loadJobRaw(job.id);

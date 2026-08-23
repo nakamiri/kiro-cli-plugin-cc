@@ -2074,3 +2074,46 @@ test("a killed runner is still noticed at once, not after its budget", async () 
   // kept the job "running" for the whole ten-minute budget.
   assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "failed");
 });
+
+// --- Round-35 regressions ---
+
+test("cancelling a job whose runner is an unreaped zombie records it", async () => {
+  const kiro = fakeSlowKiro(30);
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  // Kill it out from under cancel, leaving the reparented runner unreaped --
+  // the usual state in a container, where isPidAlive still says yes.
+  process.kill(-job.pid, "SIGKILL");
+  await new Promise((r) => setTimeout(r, 400));
+  const raw = JSON.parse(readFileSync(join(jobsDir, `${jobId}.json`), "utf-8"));
+  assert.equal(raw.status, "running", "the record should still read running on disk");
+
+  const out = run(["cancel", jobId]).stdout;
+  // The "dead" verdict was handled in reconciliation but not here, so this said
+  // the runner was still alive, or that signalling had been refused.
+  assert.doesNotMatch(out, /still alive after/);
+  assert.doesNotMatch(out, /was refused/);
+  assert.match(out, /Cancelled job|already failed/);
+});
+
+test("cancel with no id handles a zombie runner the same way", async () => {
+  const kiro = fakeSlowKiro(30);
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  process.kill(-job.pid, "SIGKILL");
+  await new Promise((r) => setTimeout(r, 400));
+  const out = run(["cancel"]).stdout;
+  assert.doesNotMatch(out, /still alive after/);
+  assert.doesNotMatch(out, /was refused/);
+});
+
+test("cancelling a live runner still works after the rewrite", async () => {
+  const marker = join(tmpDir, "rewrite-finished");
+  const kiro = fakeSlowKiro(3, marker);
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  assert.match(run(["cancel", jobId]).stdout, new RegExp(`Cancelled job ${jobId}`));
+  await new Promise((r) => setTimeout(r, 4500));
+  assert.equal(existsSync(marker), false, "kiro-cli survived the cancellation");
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "cancelled");
+});
