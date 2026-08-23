@@ -39,7 +39,7 @@ export function findKiro(): string | null {
     // every command before any of the configured budgets could apply.
     const p = execFileSync("which", ["kiro-cli"], {
       encoding: "utf-8",
-      timeout: 10_000,
+      timeout: pathLookupTimeoutMs(),
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
@@ -95,10 +95,59 @@ export function maxRetainedJobs(): number {
 }
 
 /**
- * Upper bound on the transcript bytes kept across all retained records. The
+ * Upper bound on retained transcript bytes across all retained records. The
  * count cap alone is not a size bound: fifty runs at the default output cap
  * would be half a gigabyte.
  */
 export function maxRetainedJobBytes(): number {
   return positiveIntEnv("KIRO_PLUGIN_MAX_JOB_BYTES", 64 * 1024 * 1024);
+}
+
+/*
+ * Internal timing seams. These are deliberately not documented in the README:
+ * the defaults are the product's behaviour and there is no reason for an
+ * operator to change them. They are configurable so the tests can exercise the
+ * paths that depend on them -- a bounded probe, a settle window, a flush grace
+ * -- without spending the whole default budget in real time. Waiting out the
+ * 30s version probe and the 10s PATH lookup alone cost the suite 40 seconds.
+ */
+
+/** How long `setup` waits for `kiro-cli --version` before giving up. */
+export function versionProbeTimeoutMs(): number {
+  return positiveIntEnv("KIRO_PLUGIN_VERSION_PROBE_MS", 30_000, MAX_TIMER_MS);
+}
+
+/** How long `findKiro` waits for the PATH lookup before reporting nothing. */
+export function pathLookupTimeoutMs(): number {
+  return positiveIntEnv("KIRO_PLUGIN_PATH_LOOKUP_MS", 10_000, MAX_TIMER_MS);
+}
+
+/**
+ * How long `cancel` gives a signalled runner to record its own outcome before
+ * writing one from this side.
+ */
+export function cancelSettleMs(): number {
+  return positiveIntEnv("KIRO_PLUGIN_CANCEL_SETTLE_MS", 2_000, MAX_TIMER_MS);
+}
+
+/** How often a foreground wait pays for a full reconciling read. */
+export function foregroundReconcileMs(): number {
+  return positiveIntEnv("KIRO_PLUGIN_RECONCILE_MS", 5_000, MAX_TIMER_MS);
+}
+
+/**
+ * How long the runner waits for the pipes to drain after kiro-cli has exited.
+ * A descendant holding stdout open can otherwise delay "close" indefinitely.
+ */
+export function flushGraceMs(): number {
+  return positiveIntEnv("KIRO_PLUGIN_FLUSH_GRACE_MS", 2_000, MAX_TIMER_MS);
+}
+
+/**
+ * How long a single stall on stdin is tolerated. Budgets the current stall, not
+ * the whole read, so a writer that pauses part way through a long body does not
+ * lose what has already arrived.
+ */
+export function stdinStallMs(): number {
+  return positiveIntEnv("KIRO_PLUGIN_STDIN_STALL_MS", 5_000, MAX_TIMER_MS);
 }
