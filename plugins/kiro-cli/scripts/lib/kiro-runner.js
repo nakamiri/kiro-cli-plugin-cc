@@ -86,6 +86,17 @@ let spawned;
  * tool started. Unknown counts as no.
  */
 function leadsOwnGroup() {
+    // The launcher sets this because it is the one that passed `detached: true`,
+    // which is what makes this process a group leader. Asked rather than measured,
+    // because measuring is what went wrong: the probes below are the only way to
+    // find out from in here, and the `ps` fallback is a fork on a machine that is,
+    // by the time teardown runs, as busy as the run made it. A failed probe
+    // defaulted to "no", which skips the group kill entirely and leaves a
+    // descendant kiro-cli running with no supervisor. The env is authoritative
+    // where it is set; a runner started any other way still measures, which is
+    // what keeps a directly-invoked runner from signalling its caller's group.
+    if (process.env.KIRO_PLUGIN_RUNNER_DETACHED === "1")
+        return true;
     try {
         const stat = readFileSync(`/proc/${process.pid}/stat`, "utf-8");
         // Fields after comm: state, ppid, pgrp, ...

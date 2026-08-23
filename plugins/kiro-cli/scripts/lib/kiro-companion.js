@@ -151,7 +151,14 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
     pruneJobs();
     let child;
     try {
-        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)], { stdio: "ignore", detached: true });
+        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)], {
+            stdio: "ignore",
+            detached: true,
+            // Told, rather than left to work out for itself at teardown: this is what
+            // makes the runner a process-group leader, and the launcher is the only
+            // thing that knows it for certain. See leadsOwnGroup in kiro-runner.ts.
+            env: { ...process.env, KIRO_PLUGIN_RUNNER_DETACHED: "1" },
+        });
     }
     catch (e) {
         // spawn does not only report failures asynchronously: an over-long argument
