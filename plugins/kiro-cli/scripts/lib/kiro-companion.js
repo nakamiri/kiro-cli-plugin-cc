@@ -282,10 +282,14 @@ async function awaitResult(id, timeoutMs) {
         let job;
         try {
             job = loadJobRaw(id);
+            if (job && job.status === "running" && job.pid !== undefined && !isPidAlive(job.pid)) {
+                job = loadJob(id);
+            }
         }
         catch {
             // Transient: one failed read is not the record going away, and giving up
-            // here abandoned a run that was progressing normally.
+            // here abandoned a run that was progressing normally. The reconciling read
+            // is inside this guard for the same reason -- it reads the same file.
             await sleep(FOREGROUND_POLL_MS);
             continue;
         }
@@ -297,11 +301,8 @@ async function awaitResult(id, timeoutMs) {
             // deadline and reported a timeout that never happened.
             return `ERROR: the record for job ${id} disappeared while waiting for it; its output is not available.`;
         }
-        if (job && job.status === "running" && job.pid !== undefined && !isPidAlive(job.pid)) {
-            job = loadJob(id);
-        }
-        if (job && job.status !== "running") {
-            const body = readJobResult(id) || job.note || "";
+        if (job.status !== "running") {
+            const body = bodyOf(job);
             if (job.status === "completed")
                 return body || "No output was recorded.";
             // Keep whatever Kiro produced -- it may be a complete review -- but do
@@ -393,6 +394,22 @@ export async function rescue(args) {
     }
     return runKiro("rescue", task, wantsBackground(args));
 }
+/**
+ * A job's output for display: the transcript, else its short note, else a plain
+ * statement that there was none. A transcript that exists but cannot be read is
+ * reported as such rather than as an absence of output.
+ */
+function bodyOf(job) {
+    let stored;
+    try {
+        stored = readJobResult(job.id);
+    }
+    catch (e) {
+        const size = job.resultBytes !== undefined ? `${job.resultBytes} bytes of` : "stored";
+        return `ERROR: job ${job.id} has ${size} output, but it could not be read: ${e.message}`;
+    }
+    return stored || job.note || "No output was recorded.";
+}
 export function status(args) {
     const id = args[0];
     if (id) {
@@ -422,9 +439,7 @@ export function result(args) {
         if (jobs.length === 0)
             return "No finished jobs found.";
         const latest = jobs[0];
-        // `||`, not `??`: a run that printed nothing stores an empty transcript,
-        // and returning it verbatim made /kiro-cli:result print a blank line.
-        const body = readJobResult(latest.id) || latest.note || "No output was recorded.";
+        const body = bodyOf(latest);
         if (latest.status === "completed")
             return body;
         return `[job ${latest.id} (${latest.kind}) ${latest.status}]\n\n${body}`;
@@ -434,7 +449,7 @@ export function result(args) {
         return `No job found with ID: ${id}`;
     if (job.status === "running")
         return `Job ${id} is still running. Use /kiro-cli:status to check progress.`;
-    const body = readJobResult(id) || job.note || "No output was recorded.";
+    const body = bodyOf(job);
     // Same provenance line as the no-id path: presented bare, a partial
     // transcript from an aborted run reads as a finished review.
     if (job.status === "completed")

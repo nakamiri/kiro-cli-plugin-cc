@@ -110,13 +110,21 @@ export function saveJobResult(id, text) {
     writeAtomic(outPath(id), text);
     return Buffer.byteLength(text);
 }
+/**
+ * The stored transcript, or null when there is none. A read that fails for any
+ * reason other than absence is raised: swallowing it made an unreadable
+ * transcript indistinguishable from a missing one, so a completed job reported
+ * "No output was recorded." while its own status advertised megabytes.
+ */
 export function readJobResult(id) {
     if (!isValidJobId(id))
         return null;
     try {
         return readFileSync(outPath(id), "utf-8");
     }
-    catch {
+    catch (e) {
+        if (e.code !== "ENOENT")
+            throw e;
         /* no transcript file -- may predate the split */
     }
     // Pre-split records hold the transcript inside the metadata. Without this the

@@ -2353,3 +2353,43 @@ test("cancel reports an unreadable record rather than a bare errno", async () =>
   writeFileSync(meta, saved);
   run(["cancel", jobId]);
 });
+
+// --- Round-41 regressions ---
+
+test("an unreadable transcript is reported, not called an absence of output", async () => {
+  const kiro = fakeEchoKiro();
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running");
+  assert.ok(job.resultBytes > 0);
+  // Replace the transcript with a directory: readFileSync raises EISDIR, which
+  // used to be swallowed and reported as though nothing had been produced.
+  const out = join(jobsDir, `${jobId}.out`);
+  unlinkSync(out);
+  mkdirSync(out);
+  for (const args of [["result", jobId], ["result"]]) {
+    const r = run(args);
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /No output was recorded/);
+    assert.match(r.stdout, /could not be read/);
+    assert.match(r.stdout, /bytes of output/);
+  }
+});
+
+test("a genuinely empty run still says there was no output", async () => {
+  const kiro = join(tmpDir, "silent3-kiro");
+  writeFileSync(kiro, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  assert.match(run(["result", jobId]).stdout, /No output was recorded/);
+});
+
+test("a foreground wait rides out an unreadable record", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // A neighbouring unreadable entry must not reach the wait at all, and the
+  // reconciling read is now inside the same guard as the raw one.
+  mkdirSync(join(jobsDir, "kiro-unread4-aa.json"));
+  const r = run(["review"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /^ARG:chat$/m);
+  assert.doesNotMatch(r.stdout, /EISDIR/);
+});
