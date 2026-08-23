@@ -129,7 +129,14 @@ function finalize(status: Job["status"], result: string): void {
     // settle window. The record is theirs to keep, but the transcript is ours:
     // exiting without writing it made /kiro-cli:result report "No output was
     // recorded." for a run that had produced a full review.
-    try { saveJobResult(jobId!, result); } catch { /* nothing more to do */ }
+    try {
+      // Record the size too, without touching the outcome that is theirs:
+      // otherwise status advertised no output while result returned the lot.
+      const bytes = saveJobResult(jobId!, result);
+      saveJob({ ...current, resultBytes: bytes });
+    } catch {
+      /* nothing more to do */
+    }
     // Still tear the group down, or a SIGTERM-ignoring kiro-cli would be left
     // with no supervisor and no timeout.
     sweepGroup();

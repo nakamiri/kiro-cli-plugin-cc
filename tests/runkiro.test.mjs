@@ -2000,13 +2000,16 @@ test("a young unreachable transcript survives while the store is inside budget",
     writeFileSync(join(jobsDir, `kiro-acct${n}-aa.out`), "a".repeat(bytes));
   }
   writeFileSync(join(jobsDir, "kiro-younorph-aa.out"), "keep me");
+  // 1210 bytes of transcripts are retained (600 exempt + 600 + 10), so the
+  // budget has to exceed that for the store to be genuinely inside it.
   run(["review"], {
-    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000",
+    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "4000",
     KIRO_PLUGIN_MAX_JOBS: "50", KIRO_PLUGIN_JOB_TTL_MS: "3600000",
   });
-  // Counting the doomed records' bytes too made the sweep fire at 610 retained
-  // bytes against a 1000-byte budget, taking the young orphan with it.
+  // Counting the bytes of records it had already dropped made the sweep fire
+  // even here, taking the young orphan with it.
   assert.ok(readdirSync(jobsDir).includes("kiro-younorph-aa.out"), "a young orphan was swept prematurely");
+  assert.equal(readdirSync(jobsDir).filter((f) => f.startsWith("kiro-acct") && f.endsWith(".json")).length, 3);
 });
 
 // --- Round-33 regressions ---
@@ -2116,4 +2119,46 @@ test("cancelling a live runner still works after the rewrite", async () => {
   await new Promise((r) => setTimeout(r, 4500));
   assert.equal(existsSync(marker), false, "kiro-cli survived the cancellation");
   assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "cancelled");
+});
+
+// --- Round-36 regressions ---
+
+test("unreachable bytes are weighed against everything on disk", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // One large newest transcript, exempt from retention but still occupying the
+  // disk, plus young orphans. Testing only the charged bytes left 160 KB in a
+  // 64 KB store and deleted nothing, because the charged total was zero.
+  const ts = new Date(Date.now() - 3000).toISOString();
+  writeFileSync(join(jobsDir, "kiro-bigone-aa.json"), JSON.stringify({
+    id: "kiro-bigone-aa", kind: "review", status: "completed",
+    startedAt: ts, finishedAt: ts, resultBytes: 100 * 1024,
+  }));
+  writeFileSync(join(jobsDir, "kiro-bigone-aa.out"), "b".repeat(100 * 1024));
+  for (const n of ["p", "q", "r"]) {
+    writeFileSync(join(jobsDir, `kiro-orphbig${n}-aa.out`), "o".repeat(20 * 1024));
+  }
+  run(["review"], {
+    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "64000",
+    KIRO_PLUGIN_MAX_JOBS: "50", KIRO_PLUGIN_JOB_TTL_MS: "3600000",
+  });
+  const orphans = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-orphbig"));
+  assert.deepEqual(orphans, [], `unreachable bytes retained over budget: ${orphans}`);
+  // The record itself is the newest survivor and is kept regardless.
+  assert.ok(readdirSync(jobsDir).includes("kiro-bigone-aa.json"));
+});
+
+test("a cancelled run's status advertises the output it kept", async () => {
+  const kiro = join(tmpDir, "verbose-cancel2-kiro");
+  writeFileSync(kiro, '#!/bin/sh\necho "the partial review"\nsleep 30\n', { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  await new Promise((r) => setTimeout(r, 600));
+  run(["cancel", jobId]);
+  await new Promise((r) => setTimeout(r, 2500));
+  const job = JSON.parse(run(["status", jobId]).stdout);
+  const body = run(["result", jobId]).stdout;
+  assert.match(body, /the partial review/);
+  // status said there was no output while result returned the whole transcript.
+  assert.ok(job.resultBytes > 0, `status advertises no output: ${JSON.stringify(job)}`);
 });

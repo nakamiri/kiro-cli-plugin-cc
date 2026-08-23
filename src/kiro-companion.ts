@@ -511,7 +511,16 @@ export function cancel(args: string[]): string {
       if (settled && settled.status !== "running") {
         return `Cancelled job ${job.id} (recorded as ${settled.status})`;
       }
-      if (!finished(state())) {
+      const final = state();
+      if (final === "unknown") {
+        // The probe lost this time. It may well be dead, but saying either that
+        // it is still alive or that the job was cancelled would be a guess.
+        return (
+          `Could not cancel job ${job.id}: its runner (pid ${pid}) could not be verified after ` +
+          `SIGKILL, so nothing was recorded; it may already have stopped.`
+        );
+      }
+      if (!finished(final)) {
         return (
           `Could not cancel job ${job.id}: its runner (pid ${pid}) is still alive after ` +
           `SIGTERM and SIGKILL. The job is left running.`

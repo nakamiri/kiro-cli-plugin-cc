@@ -634,6 +634,9 @@ export function pruneJobs(): void {
   // budget.
   const byteBudget = maxRetainedJobBytes();
   let kept = 0;
+  // The exempt newest survivor is not charged against retention decisions, but
+  // it is still bytes on disk, so the unreachable-file test below has to see it.
+  let exemptBytes = 0;
   let keptAny = false;
   for (const job of terminal) {
     if (doomed.has(job.id)) continue;
@@ -646,6 +649,7 @@ export function pruneJobs(): void {
     // anyone had read it.
     if (!keptAny) {
       keptAny = true;
+      exemptBytes = transcriptBytes(dir, job);
       continue;
     }
     const bytes = transcriptBytes(dir, job);
@@ -681,7 +685,10 @@ export function pruneJobs(): void {
   for (const name of strays) {
     try { strayBytes += statSync(join(dir, name)).size; } catch { /* gone */ }
   }
-  if (kept + strayBytes > byteBudget) {
+  // Against everything retained, the exempt record included: testing `kept`
+  // alone left unreachable bytes on a store well over its budget -- one 100 KB
+  // newest transcript plus three 20 KB orphans deleted nothing at all.
+  if (kept + exemptBytes + strayBytes > byteBudget) {
     for (const name of strays) {
       try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
     }
