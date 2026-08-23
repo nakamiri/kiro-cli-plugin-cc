@@ -23,7 +23,8 @@ Choose the execution mode **before** running anything:
 `Bash` tool's `run_in_background`: the script detaches the job itself and needs
 to print the job ID back to you.
 
-Then make exactly one `Bash` call.
+Then make exactly one `Bash` call to run the review. One further `Bash` call is
+allowed before it, and only for reading the recommended timeout (see below).
 
 **Flags only** -- forward each as its own argument:
 
@@ -65,8 +66,14 @@ A foreground review runs until the script's own budget expires, and the script
 waits a little beyond that before giving up, so the `Bash` tool timeout has to
 be larger than both. With the default budget that is 320000. The budget is
 configurable (`KIRO_PLUGIN_TIMEOUT_MS`), so if it may have been changed, read
-`recommendedBashTimeoutMs` from `/kiro-cli:setup --json` and use that instead of
-assuming the default.
+`recommendedBashTimeoutMs` first and use that instead of assuming the default:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" setup --json
+```
+
+Run the script directly, as above -- `/kiro-cli:setup` is a user-invoked command
+and is not available to you.
 
 `--background` makes the script print `{"jobId": "...", "status": "started"}`
 immediately. Report the job ID and tell the user to check `/kiro-cli:status`.

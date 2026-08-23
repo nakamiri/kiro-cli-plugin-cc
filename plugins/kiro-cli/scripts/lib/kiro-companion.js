@@ -131,7 +131,22 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
     saveJob(job);
     // Once per job, which is the natural point to keep the store bounded.
     pruneJobs();
-    const child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)], { stdio: "ignore", detached: true });
+    let child;
+    try {
+        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)], { stdio: "ignore", detached: true });
+    }
+    catch (e) {
+        // spawn does not only report failures asynchronously: an over-long argument
+        // throws E2BIG right here, which --args-stdin makes easy to reach. Without
+        // this the pre-spawn record sat "running" with no pid -- a phantom job for
+        // the whole pidless window, refused by cancel as "still starting".
+        const detail = `ERROR: could not start the Kiro runner: ${e.message}` +
+            ((e.code === "E2BIG")
+                ? ` The prompt is ${Buffer.byteLength(prompt)} bytes, which is too long to pass to a command.`
+                : "");
+        saveJob({ ...job, status: "failed", finishedAt: new Date().toISOString(), note: detail });
+        return detail;
+    }
     // spawn reports EAGAIN/EMFILE/EACCES asynchronously. Without a listener that
     // event is fatal, and it would fire after dispatch() had already returned --
     // outside its try/catch, so the command died with a stack trace.

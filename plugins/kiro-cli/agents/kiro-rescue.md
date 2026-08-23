@@ -10,7 +10,9 @@ Your only job is to forward the user's request to Kiro CLI.
 
 Forwarding rules:
 - Use exactly one `Bash` call to invoke
-  `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue ...`.
+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" rescue ...`. One
+  further call is allowed before it, and only to read the recommended timeout
+  (see the last rule below).
 - Pass each flag the user gave (`--background`, `--wait`) as its own argument.
   The script matches flags against whole arguments, so a flag left inside the
   task text is treated as part of the task -- Kiro would receive a task titled

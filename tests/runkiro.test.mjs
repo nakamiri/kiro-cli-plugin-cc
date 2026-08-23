@@ -1753,3 +1753,28 @@ test("setup reports the Bash timeout a foreground run needs", () => {
   assert.ok(raised.recommendedBashTimeoutMs > 900_000);
   assert.match(run(["setup"], { KIRO_CLI_PATH: kiro }).stdout, /allow \d+ms for a foreground run/);
 });
+
+// --- Round-27 regressions ---
+
+test("an over-long task is reported, not left as a phantom running job", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // Past MAX_ARG_STRLEN, so spawn throws E2BIG synchronously -- reachable now
+  // that free-form text arrives on stdin rather than a command line.
+  const huge = "x".repeat(300 * 1024);
+  const r = runWithStdin(["rescue"], `${huge}\n`, { KIRO_CLI_PATH: kiro });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.match(r.stdout, /ERROR: could not start the Kiro runner/);
+  assert.match(r.stdout, /too long to pass to a command/);
+  // The pre-spawn record used to sit "running" with no pid for the whole
+  // pidless window, and cancel refused it as "still starting".
+  const jobs = readJobs();
+  assert.equal(jobs.filter((j) => j.status === "running").length, 0, JSON.stringify(jobs));
+  assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
+});
+
+test("an ordinary task is unaffected by the size guard", () => {
+  const kiro = fakeEchoKiro();
+  const r = runWithStdin(["rescue"], "a perfectly normal task\n", { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /^ARG:a perfectly normal task$/m);
+});
