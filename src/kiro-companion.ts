@@ -131,10 +131,17 @@ function sleepSync(ms: number): void {
 
 function awaitRunnerRecord(id: string): Job | null {
   const deadline = Date.now() + CANCEL_SETTLE_MS;
+  let last: Job | null = null;
   for (;;) {
-    const fresh = loadJobRaw(id);
-    if (!fresh || fresh.status !== "running") return fresh;
-    if (Date.now() >= deadline) return fresh;
+    try {
+      last = loadJobRaw(id);
+      if (!last || last.status !== "running") return last;
+    } catch {
+      // A read that fails is no answer. This runs after the signal has landed,
+      // so raising here would leave the record un-updated and the caller with a
+      // bare errno; keep polling and let the deadline decide.
+    }
+    if (Date.now() >= deadline) return last;
     sleepSync(CANCEL_POLL_MS);
   }
 }
@@ -498,63 +505,79 @@ export function cancel(args: string[]): string {
         signalError = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
       }
     }
-    if (!signalled) {
+    // ESRCH is not a refusal: the runner finished between the check above and
+    // the signal, quite possibly having written its whole transcript. Reporting
+    // "signalling was refused; it is still running" for a completed run was
+    // simply wrong, so fall through and record the outcome instead.
+    if (!signalled && signalError !== "ESRCH") {
       return (
         `Could not cancel job ${job.id}: signalling its runner (pid ${pid}) was refused` +
         `${signalError ? ` (${signalError})` : ""}; it is still running.`
       );
     }
 
-    // The runner records its own outcome, keeping the output captured so far.
-    let settled = awaitRunnerRecord(job.id);
-    if (settled && settled.status !== "running") {
-      return `Cancelled job ${job.id} (recorded as ${settled.status})`;
-    }
-
-    // No terminal record inside the settle window, so do not assume the SIGTERM
-    // landed: escalate and check.
-    const after = state();
-    if (after === "ours") {
-      for (const target of [-pid, pid]) {
-        try {
-          process.kill(target, "SIGKILL");
-          break;
-        } catch {
-          /* try the narrower target, then give up */
-        }
-      }
-      settled = awaitRunnerRecord(job.id);
+    if (signalled) {
+      // The runner records its own outcome, keeping the output captured so far.
+      let settled = awaitRunnerRecord(job.id);
       if (settled && settled.status !== "running") {
         return `Cancelled job ${job.id} (recorded as ${settled.status})`;
       }
-      const final = state();
-      if (final === "unknown") {
-        // The probe lost this time. It may well be dead, but saying either that
-        // it is still alive or that the job was cancelled would be a guess.
+
+      // No terminal record inside the settle window, so do not assume the
+      // SIGTERM landed: escalate and check.
+      const after = state();
+      if (after === "ours") {
+        for (const target of [-pid, pid]) {
+          try {
+            process.kill(target, "SIGKILL");
+            break;
+          } catch {
+            /* try the narrower target, then give up */
+          }
+        }
+        settled = awaitRunnerRecord(job.id);
+        if (settled && settled.status !== "running") {
+          return `Cancelled job ${job.id} (recorded as ${settled.status})`;
+        }
+        const final = state();
+        if (final === "unknown") {
+          // The probe lost this time. It may well be dead, but saying either
+          // that it is still alive or that the job was cancelled is a guess.
+          return (
+            `Could not cancel job ${job.id}: its runner (pid ${pid}) could not be verified after ` +
+            `SIGKILL, so nothing was recorded; it may already have stopped.`
+          );
+        }
+        if (!finished(final)) {
+          return (
+            `Could not cancel job ${job.id}: its runner (pid ${pid}) is still alive after ` +
+            `SIGTERM and SIGKILL. The job is left running.`
+          );
+        }
+      } else if (after === "unknown") {
+        // The probe failed this time round -- it forks ps on platforms without
+        // /proc and can lose under load. Unverified is not cancelled.
         return (
           `Could not cancel job ${job.id}: its runner (pid ${pid}) could not be verified after ` +
-          `SIGKILL, so nothing was recorded; it may already have stopped.`
+          `the signal, so nothing was recorded; it may still be running.`
         );
       }
-      if (!finished(final)) {
-        return (
-          `Could not cancel job ${job.id}: its runner (pid ${pid}) is still alive after ` +
-          `SIGTERM and SIGKILL. The job is left running.`
-        );
-      }
-    } else if (after === "unknown") {
-      // The probe failed this time round -- it forks ps on platforms without
-      // /proc and can lose under load. Unverified is not cancelled.
-      return (
-        `Could not cancel job ${job.id}: its runner (pid ${pid}) could not be verified after ` +
-        `the signal, so nothing was recorded; it may still be running.`
-      );
     }
   }
 
   // Signalled but not yet recorded, or the runner is already gone: record it
   // here, preserving whatever the stored record holds.
-  const base = loadJobRaw(job.id);
+  let base: Job | null;
+  try {
+    base = loadJobRaw(job.id);
+  } catch (e) {
+    // The signal has already landed, so say what is and is not known rather
+    // than surfacing a bare errno.
+    return (
+      `Job ${job.id} was signalled, but its record could not be read to update it: ` +
+      `${(e as Error).message}`
+    );
+  }
   if (base === null) {
     // Removed during the settle window. Re-creating it would invent a job.
     return `Job ${job.id} no longer exists; nothing was recorded.`;

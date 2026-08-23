@@ -682,18 +682,25 @@ export function pruneJobs() {
     for (const job of terminal) {
         if (doomed.has(job.id))
             continue;
-        // The newest survivor is always retained, however large, and is not charged
-        // against the budget -- charging it meant a single oversized transcript
-        // exhausted the budget on its own and doomed every older record that would
-        // have fitted. The count cap has this floor for free (its minimum is one);
-        // without it here, raising KIRO_PLUGIN_MAX_OUTPUT_BYTES above the byte
-        // budget meant the next job start deleted the run just finished, before
-        // anyone had read it.
+        const bytes = transcriptBytes(dir, job);
+        // A record with no transcript costs nothing, so it is neither charged nor
+        // allowed to consume the exemption below. It was: a launch failure or a
+        // cancelled run with no output is often the newest record, and it took the
+        // floor with it -- leaving the actual latest transcript charged on its own
+        // and deleted by the very next job start.
+        if (bytes === 0)
+            continue;
+        // The newest surviving transcript is always retained, however large, and is
+        // not charged against the budget -- charging it meant a single oversized
+        // transcript exhausted the budget on its own and doomed every older one
+        // that would have fitted. The count cap has this floor for free (its
+        // minimum is one); without it here, raising KIRO_PLUGIN_MAX_OUTPUT_BYTES
+        // above the byte budget meant the next job start deleted the run just
+        // finished, before anyone had read it.
         if (!keptAny) {
             keptAny = true;
             continue;
         }
-        const bytes = transcriptBytes(dir, job);
         if (kept + bytes > byteBudget) {
             doomed.add(job.id);
             continue;

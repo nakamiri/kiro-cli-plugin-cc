@@ -2289,3 +2289,67 @@ test("a job start is not derailed by an unreadable neighbour", async () => {
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running");
   assert.equal(job.status, "completed");
 });
+
+// --- Round-40 regressions ---
+
+test("a no-output record does not spend the byte-budget exemption", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // The real latest review...
+  const older = new Date(Date.now() - 6000).toISOString();
+  writeFileSync(join(jobsDir, "kiro-realrev-aa.json"), JSON.stringify({
+    id: "kiro-realrev-aa", kind: "review", status: "completed",
+    startedAt: older, finishedAt: older, resultBytes: 4096,
+  }));
+  writeFileSync(join(jobsDir, "kiro-realrev-aa.out"), "r".repeat(4096));
+  // ...followed by a job that produced nothing, which took the exemption with it
+  // and left the review charged on its own against a smaller budget.
+  const newer = new Date(Date.now() - 3000).toISOString();
+  writeFileSync(join(jobsDir, "kiro-nooutput-aa.json"), JSON.stringify({
+    id: "kiro-nooutput-aa", kind: "rescue", status: "failed",
+    startedAt: newer, finishedAt: newer, note: "ERROR: could not start the Kiro runner",
+  }));
+
+  run(["review"], {
+    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "2048",
+    KIRO_PLUGIN_MAX_JOBS: "50", KIRO_PLUGIN_JOB_TTL_MS: "3600000",
+  });
+  const left = readdirSync(jobsDir);
+  assert.ok(left.includes("kiro-realrev-aa.out"), "the latest transcript was deleted");
+  assert.ok(left.includes("kiro-realrev-aa.json"), "the latest record was deleted");
+});
+
+test("cancel does not call a finished run's signal a refusal", async () => {
+  const kiro = fakeEchoKiro();
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  // Let it finish, then hand cancel a record that still says running with a pid
+  // that is gone: the shape of a runner that finished between the check and the
+  // signal, where both kills return ESRCH.
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  writeFileSync(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId, kind: "rescue", status: "running",
+    startedAt: new Date().toISOString(), pid: job.pid,
+  }));
+  const out = run(["cancel", jobId]).stdout;
+  assert.doesNotMatch(out, /was refused/);
+  assert.doesNotMatch(out, /it is still running/);
+});
+
+test("cancel reports an unreadable record rather than a bare errno", async () => {
+  const kiro = fakeSlowKiro(20);
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  // Replace the record with a directory: readFileSync then raises EISDIR on
+  // every read cancel makes after the signal has already landed.
+  const meta = join(jobsDir, `${jobId}.json`);
+  const saved = readFileSync(meta, "utf-8");
+  unlinkSync(meta);
+  mkdirSync(meta);
+  const r = run(["cancel", jobId]);
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.doesNotMatch(r.stdout, /^EISDIR/);
+  rmSync(meta, { recursive: true, force: true });
+  writeFileSync(meta, saved);
+  run(["cancel", jobId]);
+});
