@@ -296,10 +296,6 @@ export function classifyPid(pid: number, jobId: string): PidVerdict {
   return cmd.includes("kiro-runner") && cmd.includes(jobId) ? "ours" : "foreign";
 }
 
-export function isOurRunner(pid: number, jobId: string): boolean {
-  return classifyPid(pid, jobId) !== "foreign";
-}
-
 /** Grace over a run's own budget before an unverifiable runner is called stale. */
 const STALE_SLACK_MS = 60_000;
 
@@ -359,6 +355,13 @@ export function reconcile(job: Job): Job {
     // stopped with `cancel`, which is the remedy for one that is stuck; only an
     // unverifiable pid needs a bound, because that is the case cancel refuses.
     if (verdict === "ours") return job;
+    if (verdict === "foreign") {
+      return {
+        ...job,
+        status: "failed",
+        note: job.note ?? `ERROR: the Kiro runner is gone; pid ${job.pid} now belongs to another process.`,
+      };
+    }
     if (verdict === "unknown") {
       // Nothing here can be read (no /proc, no ps), so we cannot tell our runner
       // from a process that inherited its pid. Trusting it indefinitely made a
@@ -539,12 +542,18 @@ export function pruneJobs(): void {
   const live = new Set<string>();
   const terminal: Job[] = [];
   const transcripts: string[] = [];
+  // Files nothing can read: abandoned writes, and transcripts still inside the
+  // age grace. They are held only in case a young unreadable record recovers.
+  const strays: string[] = [];
 
   for (const name of names) {
     if (TMP_RE.test(name)) {
-      // An abandoned write of ours. Nothing reads these, so age alone decides.
+      // An abandoned write of ours. Nothing reads these, so age alone decides
+      // -- unless the store is over its byte budget, handled below.
       if (ageOf(dir, name) > ttl) {
         try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
+      } else {
+        strays.push(name);
       }
       continue;
     }
@@ -612,8 +621,25 @@ export function pruneJobs(): void {
   const retained = new Set(terminal.filter((j) => !doomed.has(j.id)).map((j) => j.id));
   for (const id of transcripts) {
     if (live.has(id) || retained.has(id) || doomed.has(id)) continue;
-    if (ageOf(dir, `${id}${OUT_EXT}`) > ttl) {
-      try { unlinkSync(join(dir, `${id}${OUT_EXT}`)); } catch { /* best effort */ }
+    const name = `${id}${OUT_EXT}`;
+    if (ageOf(dir, name) > ttl) {
+      try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
+    } else {
+      strays.push(name);
+    }
+  }
+
+  // Whatever survived on age alone is still unreachable, and it was charged
+  // nothing: three orphaned transcripts and an abandoned write held 800 KB
+  // against a 1 KB budget for the full seven days. Nothing can read them, so
+  // once the store is over budget they go first, whatever their age.
+  let strayBytes = 0;
+  for (const name of strays) {
+    try { strayBytes += statSync(join(dir, name)).size; } catch { /* gone */ }
+  }
+  if (kept + strayBytes > byteBudget) {
+    for (const name of strays) {
+      try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
     }
   }
 }

@@ -1868,3 +1868,58 @@ test("a runner that cannot start kiro-cli at all still records and sweeps", () =
 // reachable path: startRunner writes the record before the wait begins, so it is
 // always present on the first poll. Removal part way through is covered by "a
 // foreground wait stops when its record is removed underneath it".
+
+// --- Round-30 regressions ---
+
+test("unreachable bytes do not sit inside the byte budget", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // Orphaned transcripts (a runner killed between its two writes) and an
+  // abandoned write. All young, so the age guard keeps them; all unreadable, so
+  // they were charged nothing and held far more than the budget for seven days.
+  for (const n of ["o1", "o2", "o3"]) {
+    writeFileSync(join(jobsDir, `kiro-orph${n}-aa.out`), "o".repeat(200 * 1024));
+  }
+  writeFileSync(join(jobsDir, ".tmp-4242-7.tmp"), "t".repeat(200 * 1024));
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_JOB_TTL_MS: "3600000" });
+  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-orph") || f.startsWith(".tmp-"));
+  assert.deepEqual(left, [], `unreachable files survived: ${left}`);
+});
+
+test("young unreachable files are kept while the store fits", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(join(jobsDir, "kiro-orphsmall-aa.out"), "o".repeat(10));
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "3600000" });
+  // The age grace exists so a record that merely failed to parse this time does
+  // not lose its output; it should still apply when there is room.
+  assert.ok(readdirSync(jobsDir).includes("kiro-orphsmall-aa.out"));
+});
+
+test("a recycled pid is reported as such, not as a crashed runner", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  writeFileSync(join(jobsDir, "kiro-recyc3-aa.json"), JSON.stringify({
+    id: "kiro-recyc3-aa", kind: "review", status: "running",
+    startedAt: new Date().toISOString(), pid: 1,
+  }));
+  const job = JSON.parse(run(["status", "kiro-recyc3-aa"]).stdout);
+  assert.equal(job.status, "failed");
+  assert.match(job.note, /now belongs to another process/);
+  assert.doesNotMatch(job.note, /killed or crashed/);
+});
+
+test("cancel escalates to SIGKILL when SIGTERM is ignored", async () => {
+  const marker = join(tmpDir, "escalate-finished");
+  const kiro = join(tmpDir, "term-proof-kiro");
+  // Both the fake kiro and, in effect, the whole group ignore SIGTERM.
+  writeFileSync(kiro, `#!/bin/sh\ntrap '' TERM\necho started\nsleep 8\ntouch "${marker}"\n`, { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  await new Promise((r) => setTimeout(r, 400));
+  const out = run(["cancel", jobId]).stdout;
+  // It used to write "cancelled" and report success without checking.
+  assert.match(out, /Cancelled job/);
+  await new Promise((r) => setTimeout(r, 9000));
+  assert.equal(existsSync(marker), false, "kiro-cli survived the cancellation");
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "cancelled");
+});

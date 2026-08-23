@@ -445,10 +445,32 @@ export function cancel(args) {
         }
     }
     if (signalled) {
-        const settled = awaitRunnerRecord(job.id);
+        let settled = awaitRunnerRecord(job.id);
         // The runner got there first and kept the partial output; leave it alone.
         if (settled && settled.status !== "running") {
             return `Cancelled job ${job.id} (recorded as ${settled.status})`;
+        }
+        // No terminal record inside the settle window. Reporting success now would
+        // be the very thing the rest of this function refuses to do, so escalate
+        // and then check, rather than assume the SIGTERM landed.
+        if (isPidAlive(job.pid) && classifyPid(job.pid, job.id) === "ours") {
+            try {
+                process.kill(-job.pid, "SIGKILL");
+            }
+            catch {
+                try {
+                    process.kill(job.pid, "SIGKILL");
+                }
+                catch { /* already dead */ }
+            }
+            settled = awaitRunnerRecord(job.id);
+            if (settled && settled.status !== "running") {
+                return `Cancelled job ${job.id} (recorded as ${settled.status})`;
+            }
+            if (isPidAlive(job.pid) && classifyPid(job.pid, job.id) === "ours") {
+                return (`Could not cancel job ${job.id}: its runner (pid ${job.pid}) is still alive after ` +
+                    `SIGTERM and SIGKILL. The job is left running.`);
+            }
         }
     }
     else if (isPidAlive(job.pid)) {
