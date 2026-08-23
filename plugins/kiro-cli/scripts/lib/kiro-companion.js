@@ -210,7 +210,11 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
             current = loadJobRaw(job.id);
         }
         catch {
-            saveJob(job);
+            // The state is unknown, and writing the pre-spawn snapshot over it would
+            // revert an already-finished record to "running" with a dead pid, turning
+            // a completed review into a failure with its transcript still on disk.
+            // Skipping the pid write only costs cancellability until the runner
+            // records the outcome itself, which is much the smaller loss.
             return job;
         }
         if (current !== null && current.status !== "running")
@@ -504,6 +508,9 @@ export function cancel(args) {
         return (`Could not cancel job ${job.id}: its runner (pid ${pid}) cannot be identified on ` +
             `this platform, so no signal was sent and the job is still running.`);
     }
+    // Set only when we actually stopped the runner. Everything else falls through
+    // to reporting the state, never to stamping "cancelled".
+    let killed = false;
     if (before === "ours") {
         // Negated pid: the runner leads the group, so kiro-cli stops with it.
         let signalError = "";
@@ -537,6 +544,8 @@ export function cancel(args) {
             // No terminal record inside the settle window, so do not assume the
             // SIGTERM landed: escalate and check.
             const after = state();
+            if (finished(after))
+                killed = true;
             if (after === "ours") {
                 for (const target of [-pid, pid]) {
                     try {
@@ -562,6 +571,7 @@ export function cancel(args) {
                     return (`Could not cancel job ${job.id}: its runner (pid ${pid}) is still alive after ` +
                         `SIGTERM and SIGKILL. The job is left running.`);
                 }
+                killed = true;
             }
             else if (after === "unknown") {
                 // The probe failed this time round -- it forks ps on platforms without
@@ -571,8 +581,27 @@ export function cancel(args) {
             }
         }
     }
-    // Signalled but not yet recorded, or the runner is already gone: record it
-    // here, preserving whatever the stored record holds.
+    if (!killed) {
+        // Nothing was signalled: the pre-check said the runner was already finished,
+        // or the signal came back ESRCH because it exited in between. Stamping
+        // "cancelled" here claimed an outcome we did not produce and overrode
+        // reconciliation's accurate verdict, so report the state instead.
+        let fresh;
+        try {
+            fresh = loadJob(job.id);
+        }
+        catch (e) {
+            return `Job ${job.id} could not be re-read: ${e.message}`;
+        }
+        if (fresh === null)
+            return `Job ${job.id} no longer exists; nothing was recorded.`;
+        if (fresh.status !== "running") {
+            return `Job ${job.id} had already stopped before it could be cancelled; it is ${fresh.status}.`;
+        }
+        return `Could not cancel job ${job.id}: nothing was signalled, and it still reads as running.`;
+    }
+    // Stopped by us but the runner did not record it: do that here, preserving
+    // whatever the stored record holds.
     let base;
     try {
         base = loadJobRaw(job.id);

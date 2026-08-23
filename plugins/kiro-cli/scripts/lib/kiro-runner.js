@@ -15,7 +15,8 @@
  *
  * Usage: node kiro-runner.js <jobId> <timeoutMs> <kiroPath> [kiroArgs...]
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { loadJobRaw, saveJob, saveJobResult } from "./jobs.js";
 import { maxOutputBytes } from "./kiro.js";
@@ -77,14 +78,48 @@ let spawned;
  * group, and one that redirected its own stdio away is otherwise invisible --
  * it would outlive the supervisor unbounded under --trust-all-tools.
  */
-function sweepGroup() {
-    let swept = false;
+/**
+ * Whether this process leads its own process group. The launcher spawns the
+ * runner detached, so it does -- but run directly (debugging, or any future
+ * non-detached caller) it does not, and signalling the negated pid would then
+ * SIGKILL the caller's whole group: an interactive shell, or everything a Bash
+ * tool started. Unknown counts as no.
+ */
+function leadsOwnGroup() {
     try {
-        process.kill(-process.pid, "SIGKILL");
-        swept = true;
+        const stat = readFileSync(`/proc/${process.pid}/stat`, "utf-8");
+        // Fields after comm: state, ppid, pgrp, ...
+        const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+        const pgrp = Number(fields[2]);
+        if (Number.isInteger(pgrp))
+            return pgrp === process.pid;
     }
     catch {
-        /* not a group leader, or nothing left in the group */
+        /* not Linux */
+    }
+    try {
+        const out = execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], {
+            encoding: "utf-8",
+            timeout: 5_000,
+            killSignal: "SIGKILL",
+            stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        return Number(out) === process.pid;
+    }
+    catch {
+        return false;
+    }
+}
+function sweepGroup() {
+    let swept = false;
+    if (leadsOwnGroup()) {
+        try {
+            process.kill(-process.pid, "SIGKILL");
+            swept = true;
+        }
+        catch {
+            /* nothing left in the group */
+        }
     }
     if (swept)
         return;

@@ -2393,3 +2393,85 @@ test("a foreground wait rides out an unreadable record", () => {
   assert.match(r.stdout, /^ARG:chat$/m);
   assert.doesNotMatch(r.stdout, /EISDIR/);
 });
+
+// --- Round-42 regressions ---
+
+test("cancel does not claim a cancellation it did not perform", async () => {
+  const kiro = fakeEchoKiro();
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  await waitForJob((j) => j.id === jobId && j.status !== "running");
+  // A record that still reads running, pointing at a pid that has gone: the
+  // pre-check reports it finished and nothing is signalled.
+  writeFileSync(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId, kind: "rescue", status: "running",
+    startedAt: new Date().toISOString(), pid: job.pid,
+  }));
+  const out = run(["cancel", jobId]).stdout;
+  assert.doesNotMatch(out, /^Cancelled job/, `claimed a cancellation: ${out}`);
+  assert.match(out, /had already stopped|already failed/);
+});
+
+test("migration leaves a job that is still running where it is", () => {
+  if (process.getuid === undefined) return;
+  const home = join(tmpDir, "busyhome");
+  const legacy = join(home, "kiro-plugin-cc-jobs");
+  mkdirSync(legacy, { recursive: true, mode: 0o755 });
+  // A background job spanning the upgrade: its runner is this very process, so
+  // the record reconciles to running and its files are in use.
+  const runnerish = spawn(
+    process.execPath,
+    ["-e", "setTimeout(()=>{}, 30000)", "kiro-runner.js", "kiro-spanning-aa"],
+    { stdio: "ignore" },
+  );
+  try {
+    writeFileSync(join(legacy, "kiro-spanning-aa.json"), JSON.stringify({
+      id: "kiro-spanning-aa", kind: "review", status: "running",
+      startedAt: new Date().toISOString(), pid: runnerish.pid,
+    }));
+    writeFileSync(join(legacy, "kiro-spanning-aa.out"), "partial");
+    // And a finished one, which should move.
+    const ts = new Date().toISOString();
+    writeFileSync(join(legacy, "kiro-donejob-aa.json"), JSON.stringify({
+      id: "kiro-donejob-aa", kind: "review", status: "completed", startedAt: ts, finishedAt: ts,
+    }));
+    // An in-flight temporary of a live writer must survive too.
+    writeFileSync(join(legacy, `.tmp-${process.pid}-9.tmp`), "half-written");
+
+    const env = { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home };
+    const r = spawnSync(process.execPath, [COMPANION, "status"], { encoding: "utf-8", env });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+
+    const left = readdirSync(legacy);
+    // Moving a running job's record stranded it as permanently "running" while
+    // its real result was orphaned at the old path.
+    assert.ok(left.includes("kiro-spanning-aa.json"), "a running job's record was moved");
+    assert.ok(left.includes("kiro-spanning-aa.out"), "a running job's transcript was moved");
+    assert.ok(left.includes(`.tmp-${process.pid}-9.tmp`), "an in-flight temporary was deleted");
+    assert.equal(left.includes("kiro-donejob-aa.json"), false, "a finished record was not migrated");
+  } finally {
+    try { runnerish.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+});
+
+test("running the runner directly does not sweep the caller's process group", async () => {
+  const runner = resolve(__dirname, "..", "plugins", "kiro-cli", "scripts", "lib", "kiro-runner.js");
+  const marker = join(tmpDir, "caller-survived");
+  const harness = join(tmpDir, "harness.mjs");
+  // The harness runs in its own process group, so a regression here kills only
+  // it. It invokes the runner *not* detached -- so the runner does not lead the
+  // group -- with a kiro path that cannot be spawned, forcing a sweep.
+  writeFileSync(harness, `
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+spawnSync(process.execPath, [${JSON.stringify(runner)}, "kiro-direct-aa", "5000", ${JSON.stringify(join(tmpDir, "not-a-binary-at-all"))}, "chat"], { stdio: "ignore" });
+writeFileSync(${JSON.stringify(marker)}, "yes");
+`);
+  const child = spawn(process.execPath, [harness], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir },
+  });
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(existsSync(marker), true, `the caller was killed by the sweep (exit ${code})`);
+});

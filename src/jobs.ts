@@ -590,14 +590,33 @@ function migrateLegacyJobsDir(target: string): void {
   } catch {
     return;
   }
+  // A job still running there is writing to these paths. Moving its record
+  // stranded it as permanently "running" while its real result was orphaned at
+  // the old path, and existsSync below then stopped any later process from
+  // picking it up. Leave the whole id alone; the next process retries.
+  const busy = new Set<string>();
   for (const name of names) {
-    if (TMP_RE.test(name)) {
+    if (!name.endsWith(META_EXT)) continue;
+    const id = name.slice(0, -META_EXT.length);
+    if (!GENERATED_ID_RE.test(id)) continue;
+    const job = readJobFileOrSkip(join(legacy, name), id);
+    if (job && reconcile(job).status === "running") busy.add(id);
+  }
+
+  for (const name of names) {
+    const tmp = TMP_RE.exec(name);
+    if (tmp) {
+      // The same guard pruning applies: a live writer's temporary is a write in
+      // progress, and removing it makes that write fail.
+      if (isPidAlive(Number(tmp[1])) && ageOf(legacy, name) < TMP_INFLIGHT_MS) continue;
       try { unlinkSync(join(legacy, name)); } catch { /* best effort */ }
       continue;
     }
     const ext = name.endsWith(META_EXT) ? META_EXT : name.endsWith(OUT_EXT) ? OUT_EXT : null;
     if (ext === null) continue;
-    if (!GENERATED_ID_RE.test(name.slice(0, -ext.length))) continue;
+    const id = name.slice(0, -ext.length);
+    if (!GENERATED_ID_RE.test(id)) continue;
+    if (busy.has(id)) continue;
     const to = join(target, name);
     if (existsSync(to)) continue;
     try {
@@ -609,10 +628,12 @@ function migrateLegacyJobsDir(target: string): void {
       /* leave it where it is */
     }
   }
-  try {
-    if (readdirSync(legacy).length === 0) rmdirSync(legacy);
-  } catch {
-    /* still has files, or gone already */
+  if (busy.size === 0) {
+    try {
+      if (readdirSync(legacy).length === 0) rmdirSync(legacy);
+    } catch {
+      /* still has files, or gone already */
+    }
   }
 }
 
