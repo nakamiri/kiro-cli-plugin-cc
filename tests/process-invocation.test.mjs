@@ -208,6 +208,7 @@ test("stdin input is not lost when the writer stalls part way through", () => {
   const runner = spawn(process.execPath, [COMPANION, "rescue", "--args-stdin"], {
     stdio: ["pipe", "pipe", "pipe"],
     env: childEnv({ KIRO_CLI_PATH: kiro, KIRO_PLUGIN_STDIN_STALL_MS: "1000" }),
+    cwd: dirs.tmp,
   });
   let out = "";
   runner.stdout.setEncoding("utf-8");

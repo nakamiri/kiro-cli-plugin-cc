@@ -95,11 +95,12 @@ export function isRunnerPid(pid) {
 }
 
 /**
- * Tool trust is on by default in the product, and off by default here. Nothing
- * in these tests depends on the flag except the ones that assert it, and
- * keeping it out of the runner's argv costs a machine running an
- * endpoint-security agent that inspects argv about 1.7 seconds per spawn -- a
- * Defender-for-Endpoint exec hook reacts to the literal "--trust-all-tools".
+ * Tool trust is on by default in the product, and off by default here. It only
+ * has any effect on the v2 engine now -- v3 runs name an agent config instead,
+ * so the literal "--trust-all-tools" is absent from the default path altogether
+ * -- but where it does apply, keeping it out of the runner's argv costs a machine
+ * running an endpoint-security agent that inspects argv about 1.7 seconds per
+ * spawn: a Defender-for-Endpoint exec hook reacts to that exact string.
  * Pass `KIRO_PLUGIN_TRUST_ALL_TOOLS: null` to get the product default back.
  */
 const TRUST_OFF = { KIRO_PLUGIN_TRUST_ALL_TOOLS: "0" };
@@ -116,6 +117,10 @@ export function run(args, env = {}) {
   return spawnSync(process.execPath, [COMPANION, ...args], {
     encoding: "utf-8",
     env: childEnv(env),
+    // In the test's own directory, never the checkout the suite is running from.
+    // A run writes its agent config into `.kiro/agents/` relative to the working
+    // directory, and inheriting ours put that inside this repository.
+    cwd: dirs.tmp,
   });
 }
 
@@ -125,6 +130,7 @@ export function runWithStdin(args, stdin, env = {}) {
     encoding: "utf-8",
     input: stdin,
     env: childEnv(env),
+    cwd: dirs.tmp,
   });
 }
 

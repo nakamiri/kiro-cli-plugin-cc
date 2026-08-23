@@ -16,30 +16,54 @@ Use Kiro CLI from inside Claude Code for code reviews or to delegate tasks.
 - **Kiro CLI** installed and authenticated (`kiro-cli`)
 - **Node.js 18.18 or later**
 
-## Tool trust
+## What Kiro is allowed to do
 
-By default the plugin invokes `kiro-cli chat --trust-all-tools`, which lets Kiro
-read and write files and run commands in your repository without prompting. That
-is what makes `/kiro-cli:rescue` able to actually fix things, but it means a
-Kiro run has the same reach over your working tree as you do.
+Each run is given a permission set that matches what the command is for.
+`/kiro-cli:review` can read the repository and run read-only git; it cannot
+write a file or run any other command. `/kiro-cli:rescue` can read, write and run
+commands, because that is what fixing something takes.
 
-To take that away:
+This is enforced by kiro-cli's v3 agent engine, whose permission rules are
+per-capability and per-operation:
 
-```bash
-export KIRO_PLUGIN_TRUST_ALL_TOOLS=0
-```
+| Command | Allowed |
+| --- | --- |
+| `/kiro-cli:review` | `fs_read` anywhere; shell limited to `git diff`, `git status`, `git log`, `git show`, `git rev-parse`, `git ls-files`, `git branch --list`, `git blame` |
+| `/kiro-cli:rescue` | `fs_read`, `fs_write` and shell, anywhere in the repository |
 
-This is not "ask me first". The plugin always runs `kiro-cli chat
---no-interactive`, so there is nobody for Kiro to ask: without tool trust it
-analyses and reports, and changes nothing. That is what you want for
-`/kiro-cli:review`, and it makes `/kiro-cli:rescue` advisory -- it will explain
-what it would do rather than do it.
+The rules live in an agent config the plugin writes to `.kiro/agents/` when a run
+starts and removes when it ends, named after the job so two runs never share one
+file. A checkout is never left carrying it: cancellation, a timeout and a crash
+all tear it down, and a config left by a killed supervisor is swept on the next
+run. Nothing is written to your home directory, and an existing `.kiro/`
+directory is never removed.
 
-The variable fails closed: once it is set, trust is kept only for an explicitly
-affirmative value (`1`, `true`, `yes`, `on`), so a typo reduces trust rather
-than silently granting it.
+Neither agent inherits your `mcp.json`. A review has no reason to reach a
+database or a ticket tracker.
 
-`/kiro-cli:setup` reports which mode is active.
+**On the shell allowance for `rescue`**: naming the three capabilities is not a
+reduction in blast radius, and is not offered as one. A shell allowance is
+arbitrary command execution. What the config buys is that the surface is
+declared and reviewable, and that anything outside it -- MCP tools, other
+capabilities -- is refused. For `review` the restriction is real: without
+`fs_write` and with the shell limited to reporting commands, a review cannot
+change your working tree.
+
+### The older engine
+
+`KIRO_PLUGIN_AGENT_ENGINE=v2` runs the previous engine, which behaves exactly as
+it always did: `kiro-cli chat --trust-all-tools`, no per-command rules, and
+nothing written to `.kiro/`. Use it if your kiro-cli predates the v3 engine.
+
+On v2 only, `KIRO_PLUGIN_TRUST_ALL_TOOLS=0` removes the trust flag altogether.
+That is not "ask me first": the plugin always runs `--no-interactive`, so there
+is nobody for Kiro to ask, and without trust it analyses and reports while
+changing nothing. The variable fails closed -- once set, trust is kept only for
+an explicitly affirmative value (`1`, `true`, `yes`, `on`), so a typo reduces
+trust rather than silently granting it. It has no effect on v3, where the agent
+config is what grants access.
+
+`/kiro-cli:setup` reports the engine in use and, on v3, the exact rules.
 
 ### How arguments reach the script
 
@@ -74,7 +98,8 @@ per-user directory. On a shared host, keep sensitive context out of the prompt.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `KIRO_CLI_PATH` | resolved via `which kiro-cli` | Explicit path to the `kiro-cli` binary |
-| `KIRO_PLUGIN_TRUST_ALL_TOOLS` | enabled when unset | Once set, only `1`/`true`/`yes`/`on` keeps `--trust-all-tools`; anything else drops it, leaving Kiro read-only |
+| `KIRO_PLUGIN_AGENT_ENGINE` | `v3` | `v2` runs the previous engine: `--trust-all-tools`, no per-command rules, nothing written to `.kiro/` |
+| `KIRO_PLUGIN_TRUST_ALL_TOOLS` | enabled when unset | **v2 only.** Once set, only `1`/`true`/`yes`/`on` keeps `--trust-all-tools`; anything else drops it, leaving Kiro read-only |
 | `KIRO_PLUGIN_JOBS_DIR` | `$TMPDIR/kiro-plugin-cc-jobs-<uid>` (mode 0700) | Where background job records are stored |
 | `KIRO_PLUGIN_TIMEOUT_MS` | `300000` | Timeout for foreground runs (capped at 2147483647) |
 |  |  | `/kiro-cli:setup --json` reports `recommendedBashTimeoutMs` for this |

@@ -4,6 +4,10 @@ import { execFileSync } from "node:child_process";
  * documented default. Once it is set, only an explicitly affirmative value
  * keeps trust on: an unrecognised value such as "off" or "disabled" clearly
  * means the operator wanted trust reduced, so fail closed rather than open.
+ *
+ * This applies to the v2 engine only. Under v3 what Kiro may do is declared by
+ * the run's agent config instead, which can say "read the repository and run
+ * read-only git" -- something no combination of trust flags can express.
  */
 export function trustAllTools() {
     const v = process.env.KIRO_PLUGIN_TRUST_ALL_TOOLS;
@@ -11,10 +15,34 @@ export function trustAllTools() {
         return true;
     return ["1", "true", "yes", "on"].includes(v.trim().toLowerCase());
 }
-export function chatArgs(prompt) {
+/**
+ * Which kiro-cli agent engine to run.
+ *
+ * v3 by default, because it is the only one whose permission rules actually
+ * bite: on v2 the same rules are accepted and silently ignored, so a config that
+ * reads as a restriction is not one. v2 remains reachable for anyone whose
+ * kiro-cli predates the engine or who wants the old blanket trust back, and it
+ * behaves exactly as it always did -- `--trust-all-tools`, nothing else.
+ */
+export function agentEngine() {
+    const v = process.env.KIRO_PLUGIN_AGENT_ENGINE?.trim().toLowerCase();
+    return v === "v2" ? "v2" : "v3";
+}
+/**
+ * The argv for a Kiro run. `agent` is the name of the config installed for this
+ * run, and is required on v3: without it kiro-cli would fall back to the default
+ * agent, which is unrestricted.
+ */
+export function chatArgs(prompt, agent) {
     const args = ["chat", "--no-interactive"];
-    if (trustAllTools())
+    if (agentEngine() === "v3") {
+        if (agent === undefined)
+            throw new Error("the v3 engine needs an agent config for the run");
+        args.push("--v3", "--agent", agent);
+    }
+    else if (trustAllTools()) {
         args.push("--trust-all-tools");
+    }
     // A prompt such as "--verbose builds are broken" would otherwise be parsed
     // as an option. Only emitted when needed, so the common path is unchanged.
     if (prompt.startsWith("-"))

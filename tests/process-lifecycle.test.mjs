@@ -275,6 +275,7 @@ test("a foreground wait stops when its record is removed underneath it", async (
   const child = spawn(process.execPath, [COMPANION, "review"], {
     env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: dirs.jobs, KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "15000" },
     stdio: ["ignore", "pipe", "pipe"],
+    cwd: dirs.tmp,
   });
   let out = "";
   child.stdout.setEncoding("utf-8");
@@ -313,6 +314,7 @@ test("a foreground wait gives up on a pid-less record without waiting out the bu
     // The reconciling read is what has to notice this, and it runs on a
     // schedule; shortened here so the test does not sit through the default.
     env: childEnv({ KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "120000", KIRO_PLUGIN_RECONCILE_MS: "300" }),
+    cwd: dirs.tmp,
   });
   let out = "";
   child.stdout.setEncoding("utf-8");
@@ -382,4 +384,70 @@ test("a verified live runner is trusted however long it has been running", () =>
   } finally {
     try { runnerish.kill("SIGKILL"); } catch { /* already gone */ }
   }
+});
+
+
+// --- the run's agent config, which is what keeps a review read-only ---
+//
+// agents.test.mjs covers what the config says and that install/remove behave.
+// What only a real run can show is that the file is on disk at the moment
+// kiro-cli reads it, and gone once the run is over -- whichever way it ends.
+
+/** A fake kiro-cli that reports the agent configs it can see, then exits. */
+function fakeKiroListingAgents(extra = "") {
+  const path = join(dirs.tmp, "listing-kiro");
+  writeFileSync(
+    path,
+    `#!/bin/sh\nfor f in .kiro/agents/*.json; do [ -e "$f" ] && echo "SAW:$f"; done\n${extra}`,
+    { mode: 0o755 },
+  );
+  return path;
+}
+
+test("the run's agent config is there while kiro-cli runs, and gone once it ends", async () => {
+  const kiro = fakeKiroListingAgents();
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  assert.equal(job.status, "completed");
+  // kiro-cli saw it: the file exists by the time it is started, not later.
+  assert.match(resultOf(job.id), new RegExp(`SAW:\\.kiro/agents/kiro-plugin-review-${jobId}\\.json`),
+    `kiro-cli could not see its own config: ${resultOf(job.id)}`);
+  // And the checkout is as it was. An unknown --agent makes kiro-cli fall back to
+  // its unrestricted default, so a config left lying about is not harmless: the
+  // next run would name a config that is not the one on disk.
+  assert.equal(existsSync(join(dirs.tmp, ".kiro")), false, `left behind: ${readdirSync(dirs.tmp)}`);
+});
+
+test("a cancelled run takes its agent config with it", async () => {
+  // Teardown runs from the signal handler as well as from the ordinary finish,
+  // so a run that is stopped part way through still cleans up after itself.
+  const kiro = fakeKiroListingAgents("sleep 30\n");
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  const config = join(dirs.tmp, ".kiro", "agents", `kiro-plugin-rescue-${jobId}.json`);
+  for (let i = 0; i < 100 && !existsSync(config); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(existsSync(config), "the config was never written");
+
+  assert.match(run(["cancel", jobId]).stdout, /Cancelled job/);
+  await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
+  for (let i = 0; i < 100 && existsSync(config); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(existsSync(config), false, "a cancelled run left its config behind");
+});
+
+test("the v2 engine trusts every tool and writes no config", async () => {
+  // The old behaviour, unchanged and still reachable: one flag, all or nothing,
+  // and nothing written into the working directory.
+  const kiro = fakeEchoKiro();
+  // The product default for the trust flag, which the harness otherwise turns
+  // off: on v2 that flag is the whole mechanism, so this is the one place that
+  // has to see it as a user would.
+  const r = run(["review"], {
+    KIRO_CLI_PATH: kiro,
+    KIRO_PLUGIN_AGENT_ENGINE: "v2",
+    KIRO_PLUGIN_TRUST_ALL_TOOLS: null,
+  });
+  assert.match(r.stdout, /^ARG:--trust-all-tools$/m);
+  assert.doesNotMatch(r.stdout, /^ARG:--v3$/m);
+  assert.doesNotMatch(r.stdout, /^ARG:--agent$/m);
+  assert.equal(existsSync(join(dirs.tmp, ".kiro")), false, "v2 wrote an agent config");
 });

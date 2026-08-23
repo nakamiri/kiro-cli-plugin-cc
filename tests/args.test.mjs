@@ -19,6 +19,7 @@ import {
   wantsBackground,
 } from "../plugins/kiro-cli/scripts/lib/kiro-companion.js";
 import {
+  agentEngine,
   backgroundTimeoutMs,
   chatArgs,
   foregroundTimeoutMs,
@@ -28,6 +29,9 @@ import {
   trustAllTools,
 } from "../plugins/kiro-cli/scripts/lib/kiro.js";
 import { isValidJobId, reconcile } from "../plugins/kiro-cli/scripts/lib/jobs.js";
+
+/** A stand-in for the run-scoped agent name the launcher derives from the job. */
+const AGENT = "kiro-plugin-review-kiro-aaaa0000-aa";
 
 /** Runs `fn` with the given env vars set, restoring whatever was there before. */
 function withEnv(vars, fn) {
@@ -146,7 +150,7 @@ test("rescue with no task refuses instead of inventing one", async () => {
 test("a multi-line task keeps its newlines and indentation", () => {
   const task = "line one\n  indented two\nline three";
   assert.equal(buildRescuePrompt(["--", task]), task);
-  assert.equal(chatArgs(buildRescuePrompt(["--", task])).at(-1), task);
+  assert.equal(chatArgs(buildRescuePrompt(["--", task]), AGENT).at(-1), task);
 });
 
 // --- literal text after `--` (how free-form text arrives) ---
@@ -207,7 +211,7 @@ test("the prompt is one trailing argv entry, verbatim", () => {
     "line one\n  indented two",
     "a'b",
   ]) {
-    const args = chatArgs(prompt);
+    const args = chatArgs(prompt, AGENT);
     assert.equal(args.at(-1), prompt, `mangled: ${JSON.stringify(prompt)}`);
     assert.equal(args.filter((a) => a === prompt).length, 1);
   }
@@ -215,22 +219,55 @@ test("the prompt is one trailing argv entry, verbatim", () => {
 
 test("a -- separator is emitted only for a prompt that starts with a dash", () => {
   // "--verbose builds are broken" would otherwise be parsed as an option.
-  const dashed = chatArgs("--verbose is broken");
+  const dashed = chatArgs("--verbose is broken", AGENT);
   assert.deepEqual(dashed.slice(-2), ["--", "--verbose is broken"]);
-  assert.equal(chatArgs("tests are failing").includes("--"), false);
+  assert.equal(chatArgs("tests are failing", AGENT).includes("--"), false);
 });
 
-test("tool trust is on by default and fails closed for anything unaffirmative", () => {
-  assert.equal(withEnv({ KIRO_PLUGIN_TRUST_ALL_TOOLS: null }, trustAllTools), true);
-  assert.ok(withEnv({ KIRO_PLUGIN_TRUST_ALL_TOOLS: null }, () => chatArgs("x")).includes("--trust-all-tools"));
+test("the v2 engine keeps the blanket trust flag, and fails closed", () => {
+  // v2 has no way to say less than "everything": the flag is all or nothing, and
+  // an unrecognised value such as "off" or "disabled" clearly means the operator
+  // wanted trust reduced, so it goes to nothing rather than to everything.
+  const v2 = (env, fn) => withEnv({ KIRO_PLUGIN_AGENT_ENGINE: "v2", ...env }, fn);
+  assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: null }, trustAllTools), true);
+  assert.ok(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: null }, () => chatArgs("x")).includes("--trust-all-tools"));
   for (const v of ["off", "FALSE", "disabled", "0", "no", ""]) {
-    assert.equal(withEnv({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, trustAllTools), false, `trust survived ${JSON.stringify(v)}`);
+    assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, trustAllTools), false, `trust survived ${JSON.stringify(v)}`);
+    assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, () => chatArgs("x")).includes("--trust-all-tools"), false);
   }
   for (const v of ["1", "true", "YES", "on", " on "]) {
-    assert.equal(withEnv({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, trustAllTools), true, `trust lost for ${JSON.stringify(v)}`);
+    assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, trustAllTools), true, `trust lost for ${JSON.stringify(v)}`);
   }
   // Non-interactive either way, so trust off is a Kiro that can read but not act.
-  assert.equal(chatArgs("x")[1], "--no-interactive");
+  assert.equal(v2({}, () => chatArgs("x"))[1], "--no-interactive");
+  assert.equal(v2({}, () => chatArgs("x")).includes("--v3"), false);
+});
+
+test("the v3 engine names the run's agent instead of trusting everything", () => {
+  const args = withEnv({ KIRO_PLUGIN_AGENT_ENGINE: null }, () => chatArgs("x", AGENT));
+  assert.equal(agentEngine(), "v3", "v3 should be the default");
+  assert.deepEqual(args.slice(0, 5), ["chat", "--no-interactive", "--v3", "--agent", AGENT]);
+  assert.equal(args.includes("--trust-all-tools"), false);
+  // The trust flag has no say here: the rules are in the config, and leaving the
+  // old variable set must not quietly reopen anything.
+  const stillRestricted = withEnv({ KIRO_PLUGIN_TRUST_ALL_TOOLS: "1" }, () => chatArgs("x", AGENT));
+  assert.equal(stillRestricted.includes("--trust-all-tools"), false);
+});
+
+test("a v3 run without an agent is refused, not run unrestricted", () => {
+  // An unknown or absent --agent makes kiro-cli warn on stderr and fall back to
+  // its default agent, which can do anything. Building argv that would do that
+  // is the bug, so it cannot be built.
+  assert.throws(() => withEnv({ KIRO_PLUGIN_AGENT_ENGINE: null }, () => chatArgs("x")), /needs an agent config/);
+});
+
+test("only v2 is accepted as an opt-out; anything else is v3", () => {
+  for (const v of [null, "v3", "V3", "", "nonsense", "3"]) {
+    assert.equal(withEnv({ KIRO_PLUGIN_AGENT_ENGINE: v }, agentEngine), "v3", `engine changed for ${JSON.stringify(v)}`);
+  }
+  for (const v of ["v2", "V2", " v2 "]) {
+    assert.equal(withEnv({ KIRO_PLUGIN_AGENT_ENGINE: v }, agentEngine), "v2", `engine not v2 for ${JSON.stringify(v)}`);
+  }
 });
 
 // --- numeric settings ---

@@ -1,8 +1,15 @@
 import { execFileSync, spawn } from "node:child_process";
-import { readSync } from "node:fs";
+import { readSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyPid, isPidAlive, listJobs, loadJob, loadJobRaw, pruneJobs, readJobResult, saveJob } from "./jobs.js";
-import { backgroundTimeoutMs, cancelSettleMs, chatArgs, findKiro, foregroundReconcileMs, foregroundTimeoutMs, nodeBinary, stdinStallMs, trustAllTools, versionProbeTimeoutMs } from "./kiro.js";
+import { agentEngine, backgroundTimeoutMs, cancelSettleMs, chatArgs, findKiro, foregroundReconcileMs, foregroundTimeoutMs, nodeBinary, stdinStallMs, trustAllTools, versionProbeTimeoutMs } from "./kiro.js";
+import { agentName, describeRules, isKind, sweepStaleAgents } from "./agents.js";
+/**
+ * How old an agent config has to be before it is treated as abandoned. Longer
+ * than any run's budget plus its slack, so this can only ever catch a config
+ * whose runner is gone -- a live run's config is never eligible.
+ */
+const STALE_AGENT_MS = 24 * 60 * 60 * 1000;
 export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidInfo, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
 export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
@@ -149,9 +156,26 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
     saveJob(job);
     // Once per job, which is the natural point to keep the store bounded.
     pruneJobs();
+    // And to clear configs left by a run that was killed before it could tear its
+    // own down. Age-guarded, so a config belonging to a job still in flight is not
+    // taken away from it; only names this plugin generates are ever removed.
+    if (agentEngine() === "v3") {
+        try {
+            sweepStaleAgents(process.cwd(), STALE_AGENT_MS, (p) => statSync(p).mtimeMs);
+        }
+        catch {
+            /* housekeeping must not be able to fail a job */
+        }
+    }
+    // On v3 the run's permissions come from a config named here and written by
+    // the runner just before it starts kiro-cli -- it owns the run's lifetime, so
+    // it is also what removes the config again. The name has to be agreed on both
+    // sides without either waiting for the other, which is why it is derived from
+    // the job id rather than passed back.
+    const agent = agentEngine() === "v3" && isKind(kind) ? agentName(kind, job.id) : undefined;
     let child;
     try {
-        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)], {
+        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt, agent)], {
             stdio: "ignore",
             detached: true,
             // Told, rather than left to work out for itself at teardown: this is what
@@ -357,12 +381,20 @@ export function setup(args) {
     const kiro = findKiro();
     const json = args.includes("--json");
     const foreground = foregroundTimeoutMs();
+    const engine = agentEngine();
     const info = {
         installed: !!kiro,
         path: kiro,
         version: null,
         runnable: false,
-        trustAllTools: trustAllTools(),
+        agentEngine: engine,
+        // What each command may do. On v3 this is the run's agent config, written
+        // into .kiro/agents/ for the duration of the run and removed afterwards; on
+        // v2 there is no way to say less than "everything" or nothing at all.
+        permissions: engine === "v3"
+            ? { review: describeRules("review"), rescue: describeRules("rescue") }
+            : { all: trustAllTools() ? ["every tool (--trust-all-tools)"] : ["no tools"] },
+        trustAllTools: engine === "v2" && trustAllTools(),
         foregroundTimeoutMs: foreground,
         // What a caller must allow a foreground run, budget plus this side's own
         // slack. Reported rather than left to the commands to hard-code, since
@@ -397,9 +429,14 @@ export function setup(args) {
     if (!info.runnable) {
         return `❌ kiro-cli was found at ${info.path} but could not be run.\n  Error: ${info.error}\n\nCheck the path (KIRO_CLI_PATH) and that the file is executable.`;
     }
-    const trust = info.trustAllTools
-        ? "all tools trusted (set KIRO_PLUGIN_TRUST_ALL_TOOLS=0 to disable)"
-        : "no tool trust -- Kiro runs non-interactively, so it can analyse but not change anything";
+    const trust = info.agentEngine === "v3"
+        ? "per-command, from a run-scoped agent config (v3 engine)\n" +
+            `    review: ${describeRules("review").join("\n            ")}\n` +
+            `    rescue: ${describeRules("rescue").join("\n            ")}\n` +
+            "    Written to .kiro/agents/ when a run starts, removed when it ends."
+        : info.trustAllTools
+            ? "all tools trusted (v2 engine; unset KIRO_PLUGIN_AGENT_ENGINE for per-command rules)"
+            : "no tool trust -- Kiro runs non-interactively, so it can analyse but not change anything";
     return (`✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n` +
         `  Tool trust: ${trust}\n` +
         `  Foreground budget: ${info.foregroundTimeoutMs}ms ` +
