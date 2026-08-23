@@ -189,6 +189,28 @@ TypeScript source is in `src/`, compiled output goes to `plugins/kiro-cli/script
 | `src/jobs.ts` | Job store: metadata and transcripts, validation, liveness, pruning |
 | `src/kiro-runner.ts` | Detached supervisor that owns a Kiro run and its process group |
 
+### Tests
+
+`pnpm test` runs `tests/*.test.mjs`, which is what CI runs. Most of it is
+in-process: `args.test.mjs`, `jobs.test.mjs` and `store.test.mjs` call the
+exported functions directly, and the three `process-*.test.mjs` files spawn real
+processes for the things only a process can show -- detachment, signals, pid
+identity, pipes and timeouts.
+
+| Command | Runs |
+| --- | --- |
+| `pnpm test` | `tests/*.test.mjs` — the suite CI runs |
+| `pnpm test:macos` | `tests/macos/*.test.mjs` — needs a machine with no `/proc` |
+| `pnpm test:all` | both |
+
+`tests/macos/` is outside the `pnpm test` glob on purpose. It covers the `ps`
+side of the pid probe: `src/jobs.ts` reads a process's state and command line
+from `/proc` where it exists and shells out to `ps` where it does not, and on
+Linux that second path is never executed. Running those tests needs a machine
+without `/proc`, so they are not part of CI — run them locally on macOS after
+touching anything in `src/jobs.ts` that concerns pids, process groups or
+liveness.
+
 **Note**: The compiled output in `plugins/kiro-cli/scripts/lib/` is committed to the repository so that Claude Code can run the plugin without a build step on the user's machine. After modifying any TypeScript source, run `pnpm build` and commit the regenerated files.
 
 ## License
