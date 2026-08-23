@@ -1618,7 +1618,7 @@ test("an unsafe --base ref is refused rather than passed through", () => {
 
 test("ordinary git refs are still accepted", () => {
   const kiro = fakeEchoKiro();
-  for (const ref of ["main", "origin/main", "v1.2.3", "HEAD~3", "HEAD@{1}", "release/2.x"]) {
+  for (const ref of ["main", "origin/main", "v1.2.3", "HEAD~3", "HEAD^", "release/2.x"]) {
     const r = run(["review", "--base", ref], { KIRO_CLI_PATH: kiro });
     assert.ok(r.stdout.includes(`Compare against ${ref}.`), `rejected ${ref}: ${r.stdout}`);
   }
@@ -2040,3 +2040,37 @@ test("a run killed by the timeout is still recorded as one", async () => {
 // the launcher's first write and its second, which cannot be arranged from
 // outside the process. Its two siblings -- a spawn that throws and a spawn with
 // no pid -- are covered above.
+
+// --- Round-34 regressions ---
+
+test("a brace-expansion ref is refused", () => {
+  const kiro = fakeEchoKiro();
+  // Quoted these are inert, but the ref set exists so that a quoting slip is
+  // not exploitable: unquoted, v1.{0..2} becomes three words.
+  for (const ref of ["v1.{0..2}", "HEAD@{1..3}", "{main,other}"]) {
+    const r = run(["review", "--base", ref], { KIRO_CLI_PATH: kiro });
+    assert.match(r.stdout, /not a usable git ref/, `accepted ${ref}`);
+  }
+});
+
+test("a run whose output could not be read in full is not reported as complete", async () => {
+  // A stream error is not reachable from a test, so this pins the decision the
+  // code makes instead: streamErrors is what turns a clean exit into a failure.
+  const src = readFileSync(new URL("../src/kiro-runner.ts", import.meta.url), "utf-8");
+  assert.match(src, /code === 0 && streamErrors\.length > 0/);
+  assert.match(src, /could not be read in full/);
+});
+
+test("a killed runner is still noticed at once, not after its budget", async () => {
+  const kiro = fakeSlowKiro(30);
+  const { jobId } = JSON.parse(
+    run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: "600000" }).stdout
+  );
+  const job = await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  process.kill(-job.pid, "SIGKILL");
+  await new Promise((r) => setTimeout(r, 500));
+  // In a container the killed runner is reparented and often left unreaped, so
+  // its command line reads empty; treating that as merely "unknown" would have
+  // kept the job "running" for the whole ten-minute budget.
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "failed");
+});

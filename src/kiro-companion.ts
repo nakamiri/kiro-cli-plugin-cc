@@ -18,12 +18,15 @@ export class InvalidArgument extends Error {}
 
 /**
  * Refs that are safe to put on a shell command line: no quotes, no `$`, no
- * backticks, no whitespace, no separators. Wide enough for real revisions
- * (`origin/main`, `v1.2.3`, `HEAD~3`, `HEAD@{1}`), narrow enough that quoting
- * one cannot go wrong. The commands are told to check this before building the
- * command line; enforcing it here makes the contract more than advice.
+ * backticks, no whitespace, no separators -- and no braces, because `v1.{0..2}`
+ * is a brace expansion that becomes several words and would review against the
+ * wrong ref. Wide enough for real revisions (`origin/main`, `v1.2.3`,
+ * `HEAD~3`), narrow enough that quoting one cannot go wrong. The commands are
+ * told to check this before building the command line; enforcing it here makes
+ * the contract more than advice. Reflog syntax such as `HEAD@{1}` is the one
+ * casualty, which is not a base anyone reviews against.
  */
-const SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$/;
+const SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/@^~-]*$/;
 
 export function isSafeRef(ref: string): boolean {
   return SAFE_REF_RE.test(ref);
@@ -35,7 +38,7 @@ const KNOWN_FLAGS = new Set(["--wait", "--background", "--base"]);
 function requireSafeRef(ref: string): string {
   if (isSafeRef(ref)) return ref;
   throw new InvalidArgument(
-    `${ref} is not a usable git ref. Use letters, digits and . _ / @ ^ ~ { } - only.`,
+    `${ref} is not a usable git ref. Use letters, digits and . _ / @ ^ ~ - only.`,
   );
 }
 
@@ -181,9 +184,11 @@ function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: numb
       // a foreground wait the runner may already have recorded a result --
       // writing the pre-spawn snapshot over it would discard the run.
       const current = loadJobRaw(job.id);
-      if (current && current.status !== "running") return;
+      // Gone means somebody removed it; re-creating it would invent a job, which
+      // is the policy the runner's finalize states and enforces.
+      if (current === null || current.status !== "running") return;
       saveJob({
-        ...(current ?? job),
+        ...current,
         status: "failed",
         finishedAt: new Date().toISOString(),
         note: `ERROR: could not start the Kiro runner: ${err.message}`,
@@ -208,7 +213,15 @@ function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: numb
     // terminal record with "running" and a dead pid -- reporting a completed
     // review as failed.
     const current = loadJobRaw(job.id);
-    if (current && current.status !== "running") return current;
+    if (current !== null && current.status !== "running") return current;
+    if (current === null) {
+      // Removed between the first write and this one. Writing it back would
+      // resurrect a job nobody is tracking, so stop the runner instead.
+      try { process.kill(-child.pid, "SIGKILL"); } catch {
+        try { process.kill(child.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      return `ERROR: the record for job ${job.id} was removed while it was starting, so the run was stopped.`;
+    }
     saveJob(job);
   } catch (e) {
     // Without the pid on record the job is untrackable: cancel would report
@@ -437,7 +450,9 @@ export function cancel(args: string[]): string {
     // and the probe can be flaky under load, so a recycled pid that slipped
     // through there would otherwise have its whole process group signalled here.
     const verdict = classifyPid(job.pid, job.id);
-    if (verdict === "unknown") {
+    if (verdict === "dead") {
+      // Finished, just not reaped. Nothing to signal; fall through and record.
+    } else if (verdict === "unknown") {
       // Signalling an unidentifiable pid could hit anything, but recording a
       // cancellation we did not perform is worse: Kiro would keep working under
       // --trust-all-tools while the user was told it had stopped, and its
@@ -478,7 +493,8 @@ export function cancel(args: string[]): string {
     // No terminal record inside the settle window. Reporting success now would
     // be the very thing the rest of this function refuses to do, so escalate
     // and then check, rather than assume the SIGTERM landed.
-    const after = isPidAlive(job.pid) ? classifyPid(job.pid, job.id) : "gone";
+    const alive = isPidAlive(job.pid);
+    const after = alive ? classifyPid(job.pid, job.id) : "gone";
     if (after === "unknown") {
       // The probe failed this time round -- it forks ps on platforms without
       // /proc and can lose under load. Unverified is not cancelled.

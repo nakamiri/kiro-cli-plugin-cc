@@ -8,7 +8,7 @@ allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 Raw slash-command arguments: $ARGUMENTS
 
 Before building any command line, check the `--base` ref if one was given: it
-must match `^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$` (`main`, `origin/main`, `v1.2.3`,
+must match `^[A-Za-z0-9][A-Za-z0-9._/@^~-]*$` (`main`, `origin/main`, `v1.2.3`,
 `HEAD~3`). If it does not, run nothing at all and tell the user it is not a
 usable git ref. Both this command's Bash rules are pre-approved, so an unchecked
 ref would run without a permission prompt.

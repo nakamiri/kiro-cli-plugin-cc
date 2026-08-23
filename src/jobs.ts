@@ -288,11 +288,30 @@ export function pidCommandLine(pid: number): string | null {
  * process group. The probe can also be flaky under load, so both decisions are
  * made from a fresh classification rather than assuming the other one held.
  */
-export type PidVerdict = "ours" | "foreign" | "unknown";
+export type PidVerdict = "ours" | "foreign" | "dead" | "unknown";
+
+/** True when the pid is a zombie: still in the table, but finished. */
+function isZombie(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    // Field 3, after the comm field, which may itself contain spaces.
+    const after = stat.slice(stat.lastIndexOf(")") + 1).trim();
+    return after.startsWith("Z");
+  } catch {
+    return false;
+  }
+}
 
 export function classifyPid(pid: number, jobId: string): PidVerdict {
   const cmd = pidCommandLine(pid);
-  if (cmd === null) return "unknown";
+  if (cmd === null || cmd.trim() === "") {
+    // An empty command line is not somebody else's process: calling it
+    // "foreign" asserted a recycled pid that was never observed. A zombie is
+    // still definitively finished, though, and saying so is what lets a killed
+    // runner be noticed at once instead of waiting out its budget.
+    if (isZombie(pid)) return "dead";
+    return "unknown";
+  }
   return cmd.includes("kiro-runner") && cmd.includes(jobId) ? "ours" : "foreign";
 }
 
@@ -362,6 +381,13 @@ export function reconcile(job: Job): Job {
     // stopped with `cancel`, which is the remedy for one that is stuck; only an
     // unverifiable pid needs a bound, because that is the case cancel refuses.
     if (verdict === "ours") return job;
+    if (verdict === "dead") {
+      return {
+        ...job,
+        status: "failed",
+        note: job.note ?? "ERROR: the Kiro runner exited without recording a result (killed or crashed).",
+      };
+    }
     if (verdict === "foreign") {
       return {
         ...job,

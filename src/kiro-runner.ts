@@ -237,6 +237,12 @@ function settle(code: number | null, signal: NodeJS.Signals | null): void {
     finalize("failed", `${output}\n\nERROR: kiro-cli was terminated by ${signal}.`);
     return;
   }
+  if (code === 0 && streamErrors.length > 0) {
+    // The transcript is provably incomplete. Reporting it as a finished review
+    // would hand back output we know is missing pieces.
+    finalize("failed", `${output}\n\nERROR: kiro-cli exited cleanly but its output could not be read in full.`);
+    return;
+  }
   finalize(code === 0 ? "completed" : "failed", output);
 }
 
