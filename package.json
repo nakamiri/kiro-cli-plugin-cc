@@ -10,10 +10,11 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.mjs",
     "//test:macos": "Platform-specific suites, kept out of `test` (and so out of CI) on purpose: they assert the ps-based pid probe that only runs where there is no /proc. Run them on a macOS machine.",
-    "test:macos": "node --test tests/macos/*.test.mjs",
-    "test:all": "node --test tests/*.test.mjs tests/macos/*.test.mjs"
+    "test:macos": "node --test --test-concurrency=4 tests/macos/*.test.mjs",
+    "test:all": "node --test --test-concurrency=4 tests/*.test.mjs tests/macos/*.test.mjs",
+    "//test:concurrency": "Capped at 4 on purpose. node:test defaults to one worker per CPU, and the process-level suites spawn real supervisors and children; oversubscribed, assertions about what a signal did or did not reach began failing about once per run, a different one each time. At 4 the suite is stable and no slower in practice."
   },
   "devDependencies": {
     "@types/node": "22.12.0",

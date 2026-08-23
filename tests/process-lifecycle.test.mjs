@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   COMPANION,
@@ -138,37 +138,41 @@ test("a timeout beyond the timer limit is clamped instead of wrapping", async ()
 });
 
 test("a foreground timeout takes kiro-cli's descendants with it", async () => {
-  const marker = join(dirs.tmp, "descendant-finished");
+  const pidFile = join(dirs.tmp, "descendant-pid");
   const kiro = join(dirs.tmp, "leaky-stubborn-kiro");
-  // Ignores SIGTERM and leaves a descendant behind, the shape of a build step
-  // still writing to the repository under --trust-all-tools.
+  // Ignores SIGTERM and leaves a long-lived descendant behind, the shape of a
+  // build step still writing to the repository with its tools trusted. It reports
+  // the descendant's pid so the assertion can be about that process rather than
+  // about a file it would have written later.
   writeFileSync(
     kiro,
-    `#!/bin/sh\ntrap '' TERM\n( sleep 6; touch "${marker}" ) &\nsleep 6\n`,
-    { mode: 0o755 }
+    `#!/bin/sh\ntrap '' TERM\nsleep 120 &\necho $! > "${pidFile}"\nsleep 120\n`,
+    { mode: 0o755 },
   );
   const started = Date.now();
-  // The group sweep lands at timeout plus flush grace, so the grace is pinned
-  // short and the descendant made long. On the defaults the two were 2.8s and
-  // 4.0s apart, and 1.2s of margin did not survive node:test running the files in
-  // parallel: this assertion failed for real there while passing on its own.
-  //
-  // The margin is what decides it. An earlier attempt to explain the flake by
-  // `sweepGroup` asking `ps` whether it leads its own group -- and treating an
-  // unreadable answer as "no", skipping the group kill -- did not hold up: the
-  // launcher now tells the runner outright, and the assertion still failed once in
-  // three runs without the widened margin.
-  const r = run(["review"], {
-    KIRO_CLI_PATH: kiro,
-    KIRO_PLUGIN_TIMEOUT_MS: "800",
-    KIRO_PLUGIN_FLUSH_GRACE_MS: "200",
-  });
+  const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "800" });
   assert.ok(Date.now() - started < 12_000, "the foreground wait was not bounded");
   assert.match(r.stdout, /ERROR/);
-  // Wait past the descendant's own deadline, measured from the run's start
-  // rather than from here, so a slow run does not shorten the window.
-  await new Promise((res) => setTimeout(res, Math.max(0, started + 7_500 - Date.now())));
-  assert.equal(existsSync(marker), false, "a descendant outlived the timeout");
+
+  // Asserted against the process table, not against a marker file appearing after
+  // a sleep. The file form of this raced the descendant's own timer against the
+  // group teardown and failed roughly one full-suite run in three -- always with
+  // the group kill provably sent, so what it was really measuring was which of
+  // two deadlines the machine got to first. Whether a descendant outlived the run
+  // is a question about the process, so ask about the process.
+  const pid = Number(readFileSync(pidFile, "utf-8").trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, `no descendant pid was reported: ${pid}`);
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      // EPERM means it is still there under another uid, which still counts.
+      return e.code === "EPERM";
+    }
+  };
+  for (let i = 0; i < 100 && alive(); i++) await new Promise((res) => setTimeout(res, 50));
+  assert.equal(alive(), false, `a descendant (pid ${pid}) outlived the timeout`);
 });
 
 test("a run that exits just before the deadline is not recorded as a timeout", async () => {

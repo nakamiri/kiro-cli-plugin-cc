@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   COMPANION,
@@ -127,21 +127,38 @@ test("a job finishes when kiro-cli exits but a descendant still holds its stdout
 });
 
 test("a descendant that redirected its own stdio does not outlive the run", async () => {
-  const marker = join(dirs.tmp, "hidden-descendant");
+  const pidFile = join(dirs.tmp, "hidden-descendant-pid");
   const kiro = join(dirs.tmp, "hidden-desc-kiro");
   // stdio redirected away, so it never delays close() and is invisible to the
-  // supervisor: the clean exit path was the one that left it running.
+  // supervisor: the clean exit path was the one that left it running. It reports
+  // its pid so the assertion can be about that process, and it outlives any
+  // plausible teardown so that "still there" means it was never signalled.
   writeFileSync(
     kiro,
-    `#!/bin/sh\necho "the review"\n( sleep 3; touch "${marker}" ) >/dev/null 2>&1 &\nexit 0\n`,
-    { mode: 0o755 }
+    `#!/bin/sh\necho "the review"\n( sleep 120 >/dev/null 2>&1 & echo $! > "${pidFile}" ) >/dev/null 2>&1\nexit 0\n`,
+    { mode: 0o755 },
   );
   const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
   assert.equal(job.status, "completed");
   assert.match(resultOf(job.id), /the review/);
-  await new Promise((r) => setTimeout(r, 3500));
-  assert.equal(existsSync(marker), false, "a descendant outlived the supervisor");
+
+  // Against the process table rather than a marker file the descendant would
+  // write later: the file form raced its sleep against the group teardown and
+  // failed intermittently under the parallel suite, which made it a test of which
+  // deadline the machine reached first.
+  const pid = Number(readFileSync(pidFile, "utf-8").trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, `no descendant pid was reported: ${pid}`);
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return e.code === "EPERM";
+    }
+  };
+  for (let i = 0; i < 100 && alive(); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(alive(), false, `a descendant (pid ${pid}) outlived the supervisor`);
 });
 
 test("an over-long task is reported, not left as a phantom running job", () => {
