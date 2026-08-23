@@ -1778,3 +1778,66 @@ test("an ordinary task is unaffected by the size guard", () => {
   const r = runWithStdin(["rescue"], "a perfectly normal task\n", { KIRO_CLI_PATH: kiro });
   assert.match(r.stdout, /^ARG:a perfectly normal task$/m);
 });
+
+// --- Round-28 regressions ---
+
+test("a verified runner that outlives its budget is not running for ever", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // Alive and verifiably a runner for this job -- a supervisor wedged past its
+  // own budget. It used to be trusted indefinitely, which left the record
+  // immune to every retention budget and unresolvable by status and result.
+  // The extra argv entries put "kiro-runner" and the job id in the process's
+  // command line, so the identity probe returns "ours" -- otherwise this would
+  // take the "foreign" branch and prove nothing about the budget bound.
+  const runnerish = spawn(
+    process.execPath,
+    ["-e", "setTimeout(()=>{}, 60000)", "kiro-runner.js", "kiro-wedged-aa"],
+    { stdio: "ignore" },
+  );
+  try {
+    writeFileSync(join(jobsDir, "kiro-wedged-aa.json"), JSON.stringify({
+      id: "kiro-wedged-aa", kind: "review", status: "running",
+      startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      pid: runnerish.pid, timeoutMs: 1000,
+    }));
+    const cmdline = readFileSync(`/proc/${runnerish.pid}/cmdline`, "utf-8");
+    assert.ok(cmdline.includes("kiro-runner") && cmdline.includes("kiro-wedged-aa"),
+      `probe would not read this as ours: ${JSON.stringify(cmdline)}`);
+    const job = JSON.parse(run(["status", "kiro-wedged-aa"]).stdout);
+    assert.equal(job.status, "failed");
+    assert.match(job.note, /outlived its timeout/);
+  } finally {
+    try { runnerish.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+});
+
+test("a run inside its recorded budget is still running", async () => {
+  const kiro = fakeSlowKiro(4);
+  const { jobId } = JSON.parse(
+    run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: "60000" }).stdout
+  );
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "running");
+  run(["cancel", jobId]);
+});
+
+test("migrated records are not left world-readable", () => {
+  if (process.getuid === undefined) return;
+  const home = join(tmpDir, "modehome");
+  const legacy = join(home, "kiro-plugin-cc-jobs");
+  mkdirSync(legacy, { recursive: true, mode: 0o755 });
+  writeFileSync(join(legacy, "kiro-modejob-aa.json"), JSON.stringify({
+    id: "kiro-modejob-aa", kind: "review", status: "completed",
+    startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:00:00.000Z",
+  }), { mode: 0o644 });
+  writeFileSync(join(legacy, "kiro-modejob-aa.out"), "private source", { mode: 0o644 });
+
+  const env = { ...process.env, KIRO_PLUGIN_JOBS_DIR: "", TMPDIR: home };
+  const r = spawnSync(process.execPath, [COMPANION, "status"], { encoding: "utf-8", env });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  const moved = join(home, `kiro-plugin-cc-jobs-${process.getuid()}`);
+  // rename preserves the mode, and pre-0.1.0 records were written without one.
+  for (const f of ["kiro-modejob-aa.json", "kiro-modejob-aa.out"]) {
+    assert.equal(statSync(join(moved, f)).mode & 0o077, 0, `${f} is still group/world readable`);
+  }
+});

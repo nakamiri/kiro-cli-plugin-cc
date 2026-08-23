@@ -15,7 +15,9 @@ Core constraint:
 Choose the execution mode **before** running anything:
 - `--wait` present: run in the foreground.
 - `--background` present: forward it to the script.
-- Neither: check the size of the change first (`git diff --stat`). Beyond 1-2
+- Neither: check the size of the change first with `git diff --stat HEAD` (or
+  against the `--base` ref if one was given). Plain `git diff --stat` shows only
+  unstaged work, so a fully staged change reads as nothing at all. Beyond 1-2
   files, add `--background` to the arguments and tell the user why. Otherwise
   run in the foreground.
 
@@ -23,8 +25,9 @@ Choose the execution mode **before** running anything:
 `Bash` tool's `run_in_background`: the script detaches the job itself and needs
 to print the job ID back to you.
 
-Then make exactly one `Bash` call to run the review. One further `Bash` call is
-allowed before it, and only for reading the recommended timeout (see below).
+Run the review with exactly one `Bash` call. The read-only checks above -- the
+`git diff --stat HEAD` size check and the timeout probe below -- may each take a
+call of their own first; nothing else may.
 
 **Flags only** -- forward each as its own argument:
 

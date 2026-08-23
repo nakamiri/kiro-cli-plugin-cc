@@ -159,9 +159,19 @@ function finalize(status: Job["status"], result: string): void {
 const child = spawn(kiroPath, kiroArgs, { stdio: ["ignore", "pipe", "pipe"] });
 spawned = child;
 
+/** How long to wait for the timeout kill to produce an exit before giving up. */
+const TIMEOUT_ESCAPE_MS = 5_000;
+
+let escapeTimer: NodeJS.Timeout | undefined;
+
 const timer = setTimeout(() => {
   timedOut = true;
   try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  // A SIGKILL that does not land -- EPERM against a child that changed uid, or
+  // a process wedged in an uninterruptible wait -- produces no exit and no
+  // close, so nothing else here would ever record the outcome or tear the group
+  // down. Every other terminal path escalates; this one has to as well.
+  escapeTimer = setTimeout(() => settle(null, "SIGKILL"), TIMEOUT_ESCAPE_MS);
 }, timeoutMs);
 
 // setEncoding decodes through a StringDecoder, so a multi-byte character split
@@ -184,6 +194,7 @@ function settle(code: number | null, signal: NodeJS.Signals | null): void {
   if (settled) return;
   settled = true;
   clearTimeout(timer);
+  if (escapeTimer) clearTimeout(escapeTimer);
   const output = collected();
   if (timedOut) {
     finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`);

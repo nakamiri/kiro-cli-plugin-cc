@@ -346,7 +346,22 @@ export function reconcile(job: Job): Job {
   }
   if (isPidAlive(job.pid)) {
     const verdict = classifyPid(job.pid, job.id);
-    if (verdict === "ours") return job;
+    const age = Date.now() - Date.parse(job.startedAt);
+    // Fail closed on an unusable age, as the pidless guard above does.
+    const withinBudget = Number.isFinite(age) && age <= staleAfterMs(job);
+    if (verdict === "ours") {
+      if (withinBudget) return job;
+      // Verified as ours, but past its own budget plus the grace. The runner
+      // enforces that budget itself, so it is wedged: reporting "running" for
+      // ever would make the record immune to every retention budget (pruning
+      // treats a running job as live) and leave status and result unable to
+      // resolve it.
+      return {
+        ...job,
+        status: "failed",
+        note: job.note ?? "ERROR: the Kiro runner is still alive but has outlived its timeout without recording a result.",
+      };
+    }
     if (verdict === "unknown") {
       // Nothing here can be read (no /proc, no ps), so we cannot tell our runner
       // from a process that inherited its pid. Trusting it indefinitely made a
@@ -354,8 +369,7 @@ export function reconcile(job: Job): Job {
       // pruning treats running jobs as live, and refused by cancel because an
       // unproven pid is not signalled. No run can outlive the largest timeout,
       // so past that it is stale whatever the pid now belongs to.
-      const age = Date.now() - Date.parse(job.startedAt);
-      if (!Number.isFinite(age) || age <= staleAfterMs(job)) return job;
+      if (withinBudget) return job;
       return {
         ...job,
         status: "failed",
@@ -430,20 +444,6 @@ function ageOf(dir: string, name: string): number {
   }
 }
 
-/**
- * Keeps the store bounded. Every run -- foreground included -- leaves a record
- * and a transcript, so without this the directory grows without limit. Three
- * budgets apply to finished jobs: age, count and total transcript bytes. A
- * running job is never touched.
- *
- * The scan is over the directory rather than over listJobs(), so that a record
- * listJobs rejects (corrupt, mismatched id, unusable timestamp), an orphaned
- * transcript and an abandoned temporary file are cleaned up too -- none of them
- * is visible to it. Only names this plugin could have generated are ever
- * removed, and only once past the TTL; everything else in the directory is left
- * strictly alone. Best effort throughout -- housekeeping must not be able to
- * fail a job.
- */
 let legacyMigrated = false;
 
 /**
@@ -492,7 +492,14 @@ function migrateLegacyJobsDir(target: string): void {
     if (!GENERATED_ID_RE.test(name.slice(0, -ext.length))) continue;
     const to = join(target, name);
     if (existsSync(to)) continue;
-    try { renameSync(join(legacy, name), to); } catch { /* leave it where it is */ }
+    try {
+      renameSync(join(legacy, name), to);
+      // rename keeps the old mode, and pre-0.1.0 records were written without
+      // one -- so a migrated transcript of private source stayed 0644.
+      chmodSync(to, 0o600);
+    } catch {
+      /* leave it where it is */
+    }
   }
   try {
     if (readdirSync(legacy).length === 0) rmdirSync(legacy);
@@ -501,6 +508,20 @@ function migrateLegacyJobsDir(target: string): void {
   }
 }
 
+/**
+ * Keeps the store bounded. Every run -- foreground included -- leaves a record
+ * and a transcript, so without this the directory grows without limit. Three
+ * budgets apply to finished jobs: age, count and total transcript bytes. A
+ * running job is never touched.
+ *
+ * The scan is over the directory rather than over listJobs(), so that a record
+ * listJobs rejects (corrupt, mismatched id, unusable timestamp), an orphaned
+ * transcript and an abandoned temporary file are cleaned up too -- none of them
+ * is visible to it. Only names this plugin could have generated are ever
+ * removed, and only once past the TTL; everything else in the directory is left
+ * strictly alone. Best effort throughout -- housekeeping must not be able to
+ * fail a job.
+ */
 export function pruneJobs(): void {
   let dir: string;
   let names: string[];
