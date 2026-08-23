@@ -8,6 +8,7 @@ import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { classifyPid } from "../plugins/kiro-cli/scripts/lib/jobs.js";
 import {
   RUNNER,
   dirs,
@@ -152,6 +153,31 @@ test("a prompt mentioning another job's id does not impersonate it", async () =>
   // And the real job is untouched.
   assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "running");
   run(["cancel", jobId]);
+});
+
+test("only the runner's first mention of the script decides which job it is", async () => {
+  // Adjacency on its own is forgeable. Where argv boundaries are approximated --
+  // the `ps` probe, on any platform without /proc -- a prompt reading
+  // "... kiro-runner.js <id> ..." splits into exactly the pair the check wants,
+  // and one process then answered "ours" for two different job ids at once.
+  // cancel's only guard before signalling a negated pid is that answer.
+  //
+  // Passing the pair as separate arguments reproduces the same shape on /proc,
+  // so this holds CI to it too; tests/macos covers the prompt-shaped original.
+  const child = spawn(process.execPath, [
+    "-e", "setTimeout(() => {}, 30000)",
+    RUNNER, "kiro-firstref-real", "1000", "/bin/kiro-cli", "chat",
+    "look", "at", RUNNER, "kiro-firstref-fake", "as", "well",
+  ], { stdio: "ignore", detached: true });
+  // Or the test file waits out the fixture's own timer before it will exit.
+  child.unref();
+  try {
+    assert.equal(classifyPid(child.pid, "kiro-firstref-real"), "ours");
+    assert.equal(classifyPid(child.pid, "kiro-firstref-fake"), "foreign");
+  } finally {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
+    try { process.kill(child.pid, "SIGKILL"); } catch { /* already gone */ }
+  }
 });
 
 test("cancel reports an unreadable record rather than a bare errno", async () => {
