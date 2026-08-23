@@ -143,8 +143,14 @@ function readJobFile(path, expectedId) {
     try {
         raw = readFileSync(path, "utf-8");
     }
-    catch {
-        return null;
+    catch (e) {
+        // Only absence is null. Swallowing everything conflated "this record was
+        // removed" with "this read failed once", and callers act very differently
+        // on the two: one transient EMFILE had the launcher kill a healthy runner
+        // and a foreground wait give up on a run that was fine.
+        if (e.code === "ENOENT")
+            return null;
+        throw e;
     }
     let parsed;
     try {
@@ -364,8 +370,14 @@ export function reconcile(job) {
     if (isPidAlive(job.pid)) {
         const verdict = classifyPid(job.pid, job.id);
         const age = jobAgeMs(job);
-        // Fail closed on an unusable age, as the pidless guard above does.
-        const withinBudget = age !== null && age <= staleAfterMs(job);
+        // An unusable age -- a clock stepped backwards mid-flight -- means we cannot
+        // tell how long this has run, not that it has run too long. The pidless
+        // guard above can fail closed because there is no process at stake there; a
+        // live pid is different: declaring it failed lets pruning delete the record
+        // and transcript out from under a runner that is still working, after which
+        // it discards the review it had finished. The bound exists only to stop an
+        // indefinitely stuck record, and without a usable age it cannot be applied.
+        const withinBudget = age === null || age <= staleAfterMs(job);
         // A supervisor that is alive and verifiably this job's is authoritative,
         // whatever the clock says: the job really is running. Judging it by elapsed
         // wall time instead was worse than the wedged runner it was meant to catch
@@ -424,13 +436,25 @@ export function loadJob(id) {
     const job = loadJobRaw(id);
     return job ? reconcile(job) : null;
 }
+/** As readJobFile, but a read failure is skipped rather than raised. */
+function readJobFileOrSkip(path, expectedId) {
+    try {
+        return readJobFile(path, expectedId);
+    }
+    catch {
+        return null;
+    }
+}
 export function listJobs() {
     const dir = ensureJobsDir();
     const jobs = [];
     for (const f of readdirSync(dir)) {
         if (!f.endsWith(META_EXT))
             continue;
-        const job = readJobFile(join(dir, f), f.slice(0, -META_EXT.length));
+        // Skipped, not raised: one unreadable entry must not break a listing. A
+        // caller that asked for a specific id gets the error, since there the
+        // difference between "gone" and "unreadable" changes what it should do.
+        const job = readJobFileOrSkip(join(dir, f), f.slice(0, -META_EXT.length));
         if (job)
             jobs.push(reconcile(job));
     }
@@ -619,7 +643,7 @@ export function pruneJobs() {
         const id = name.slice(0, -META_EXT.length);
         if (!GENERATED_ID_RE.test(id))
             continue;
-        const job = readJobFile(join(dir, name), id);
+        const job = readJobFileOrSkip(join(dir, name), id);
         if (!job) {
             // Ours by name but unreadable by every other code path, so it can only
             // ever take up space.

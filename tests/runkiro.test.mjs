@@ -110,9 +110,16 @@ function resultOf(id) {
 }
 
 function readJobs() {
-  return readdirSync(jobsDir)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => JSON.parse(readFileSync(join(jobsDir, f), "utf-8")));
+  const jobs = [];
+  for (const f of readdirSync(jobsDir)) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      jobs.push(JSON.parse(readFileSync(join(jobsDir, f), "utf-8")));
+    } catch {
+      // Some tests deliberately plant unreadable entries; skip them here.
+    }
+  }
+  return jobs;
 }
 
 async function waitForJob(predicate, timeoutMs = 20_000) {
@@ -2247,4 +2254,38 @@ test("setup says what turning tool trust off actually does", () => {
   assert.match(off, /analyse but not change/);
   const on = run(["setup"], { KIRO_CLI_PATH: kiro }).stdout;
   assert.match(on, /all tools trusted/);
+});
+
+// --- Round-39 regressions ---
+
+test("an unreadable record is not reported as a missing one", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // A directory where the record should be: readFileSync raises EISDIR, which
+  // is emphatically not "this job does not exist".
+  mkdirSync(join(jobsDir, "kiro-unread-aa.json"));
+  const r = run(["status", "kiro-unread-aa"]);
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.match(r.stdout, /^ERROR: /);
+  assert.doesNotMatch(r.stdout, /No job found/);
+});
+
+test("one unreadable record does not break a listing", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  mkdirSync(join(jobsDir, "kiro-unread2-aa.json"));
+  const ts = new Date().toISOString();
+  writeFileSync(join(jobsDir, "kiro-fine-aa.json"), JSON.stringify({
+    id: "kiro-fine-aa", kind: "review", status: "completed", startedAt: ts, finishedAt: ts,
+  }));
+  const listed = JSON.parse(run(["status"]).stdout);
+  assert.deepEqual(listed.map((j) => j.id), ["kiro-fine-aa"]);
+  assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
+});
+
+test("a job start is not derailed by an unreadable neighbour", async () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  mkdirSync(join(jobsDir, "kiro-unread3-aa.json"));
+  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running");
+  assert.equal(job.status, "completed");
 });

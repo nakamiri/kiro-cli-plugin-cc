@@ -194,8 +194,17 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
         // Re-read first, like the error handler above: a fast run can finalize
         // before this write lands, and the pre-spawn snapshot would then replace a
         // terminal record with "running" and a dead pid -- reporting a completed
-        // review as failed.
-        const current = loadJobRaw(job.id);
+        // review as failed. A read that fails is not an answer either way, so it
+        // falls through to the write rather than to the "removed" branch below,
+        // which would kill a perfectly healthy runner.
+        let current = null;
+        try {
+            current = loadJobRaw(job.id);
+        }
+        catch {
+            saveJob(job);
+            return job;
+        }
         if (current !== null && current.status !== "running")
             return current;
         if (current === null) {
@@ -262,7 +271,16 @@ async function awaitResult(id, timeoutMs) {
         // Raw: the reconciling read runs a full identity probe, which forks ps on
         // every platform without /proc -- around 1500 times over a long review.
         // A dead runner is caught by the cheap liveness check below instead.
-        let job = loadJobRaw(id);
+        let job;
+        try {
+            job = loadJobRaw(id);
+        }
+        catch {
+            // Transient: one failed read is not the record going away, and giving up
+            // here abandoned a run that was progressing normally.
+            await sleep(FOREGROUND_POLL_MS);
+            continue;
+        }
         if (!job) {
             // startRunner writes the record before this is ever reached, so a missing
             // one means it went away -- pruning from a concurrent job start, or
