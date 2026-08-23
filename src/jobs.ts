@@ -262,33 +262,55 @@ export function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Best-effort argv for `pid`, or null when it cannot be determined. An empty
- * array means the process is there but has no command line -- a zombie or a
- * kernel thread. Kept as an array rather than a string because the runner has
- * to be recognised by position: its prompt is one of these entries, and a
- * prompt that merely mentions another job's id would otherwise match it.
+ * What the system can tell us about `pid`: its scheduler state letter and its
+ * argv, or null when neither can be read. An empty argv means the process is
+ * there but has no command line -- a zombie or a kernel thread. argv is kept as
+ * an array because the runner has to be recognised by position: its prompt is
+ * one of these entries, and a prompt that merely mentions another job's id would
+ * otherwise match it.
  */
-export function pidArgv(pid: number): string[] | null {
+interface PidInfo {
+  state: string | null;
+  argv: string[];
+}
+
+export function pidInfo(pid: number): PidInfo | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
+  let state: string | null = null;
+  let haveProc = false;
   try {
-    return readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter(Boolean);
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    // Fields after comm, which may itself contain spaces: state, ppid, pgrp...
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    state = fields[0] ?? null;
+    haveProc = true;
   } catch {
     /* not Linux, or the process is gone */
   }
+  if (haveProc) {
+    try {
+      return { state, argv: readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter(Boolean) };
+    } catch {
+      return { state, argv: [] };
+    }
+  }
   try {
-    // -ww: BSD and macOS truncate to the terminal width when stdout is not a
-    // tty, which would drop the job id and defeat the check below.
-    const out = execFileSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], {
+    // One call for both, so the fallback platform pays a single fork. -ww
+    // because BSD and macOS truncate to the terminal width off a tty, which
+    // would drop the job id and defeat the positional match below.
+    const out = execFileSync("ps", ["-ww", "-o", "state=,args=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: 5_000,
       // Without this the timeout only sends SIGTERM and then keeps waiting.
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
+    if (out === "") return { state: null, argv: [] };
+    const [first, ...rest] = out.split(/\s+/);
     // ps gives one string, so argument boundaries are approximated by
     // whitespace. That is enough here: the two entries this is matched on -- the
     // runner's path and the job id -- are adjacent and contain no spaces.
-    return out === "" ? [] : out.split(/\s+/);
+    return { state: first ?? null, argv: rest };
   } catch {
     return null;
   }
@@ -308,18 +330,6 @@ export function pidArgv(pid: number): string[] | null {
  */
 export type PidVerdict = "ours" | "foreign" | "dead" | "unknown";
 
-/** True when the pid is a zombie: still in the table, but finished. */
-function isZombie(pid: number): boolean {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-    // Field 3, after the comm field, which may itself contain spaces.
-    const after = stat.slice(stat.lastIndexOf(")") + 1).trim();
-    return after.startsWith("Z");
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Whether this argv is our runner for `jobId`. The runner is invoked as
  * `node <...>/kiro-runner.js <jobId> <timeoutMs> <kiro> chat ... <prompt>`, so
@@ -336,16 +346,19 @@ function isRunnerFor(argv: string[], jobId: string): boolean {
 }
 
 export function classifyPid(pid: number, jobId: string): PidVerdict {
-  const argv = pidArgv(pid);
-  if (argv === null || argv.length === 0) {
-    // An empty command line is not somebody else's process: calling it
-    // "foreign" asserted a recycled pid that was never observed. A zombie is
-    // still definitively finished, though, and saying so is what lets a killed
-    // runner be noticed at once instead of waiting out its budget.
-    if (isZombie(pid)) return "dead";
-    return "unknown";
-  }
-  return isRunnerFor(argv, jobId) ? "ours" : "foreign";
+  const info = pidInfo(pid);
+  if (info === null) return "unknown";
+  // State first, and on every platform, not just where /proc exists. A zombie
+  // is definitively finished, and saying so is what lets a killed runner be
+  // noticed at once instead of waiting out its budget. Where this was Linux-only
+  // the same runner was called "foreign" -- asserting a pid recycling that never
+  // happened -- or, if ps still reported its argv, "ours", leaving the job
+  // uncancellable until its budget expired.
+  if (info.state !== null && info.state.startsWith("Z")) return "dead";
+  // An empty command line is not somebody else's process: calling it "foreign"
+  // asserted a recycled pid that was never observed.
+  if (info.argv.length === 0) return "unknown";
+  return isRunnerFor(info.argv, jobId) ? "ours" : "foreign";
 }
 
 /**

@@ -2475,3 +2475,67 @@ writeFileSync(${JSON.stringify(marker)}, "yes");
   const code = await new Promise((resolve) => child.on("close", resolve));
   assert.equal(existsSync(marker), true, `the caller was killed by the sweep (exit ${code})`);
 });
+
+// --- Round-43 regressions ---
+
+test("a foreground wait gives up on a pid-less record without waiting out the budget", () => {
+  const kiro = fakeSlowKiro(30);
+  mkdirSync(jobsDir, { recursive: true });
+  // The launcher skips the pid write when its re-read fails, so a record can
+  // legitimately be "running" with no pid. The cheap liveness check cannot see
+  // that, and the wait used to run the whole budget out.
+  const child = spawn(process.execPath, [COMPANION, "review"], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, KIRO_PLUGIN_JOBS_DIR: jobsDir, KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "120000" },
+  });
+  let out = "";
+  child.stdout.setEncoding("utf-8");
+  child.stdout.on("data", (d) => { out += d; });
+
+  const started = Date.now();
+  return (async () => {
+    // Strip the pid and back-date it past the pidless grace, so reconciliation
+    // is the only thing that can notice.
+    while (Date.now() - started < 8000) {
+      const meta = readJobs().find((j) => typeof j.pid === "number");
+      if (meta) {
+        process.kill(-meta.pid, "SIGKILL");
+        writeFileSync(join(jobsDir, `${meta.id}.json`), JSON.stringify({
+          id: meta.id, kind: meta.kind, status: "running",
+          startedAt: new Date(Date.now() - 600_000).toISOString(),
+        }));
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const code = await new Promise((resolve) => child.on("close", resolve));
+    assert.equal(code, 0);
+    assert.ok(Date.now() - started < 40_000, `waited ${Date.now() - started}ms of a 120s budget`);
+    assert.doesNotMatch(out, /did not finish within/);
+  })();
+});
+
+test("zombie detection does not depend on /proc", () => {
+  // The state letter is read from /proc where it exists and from ps otherwise,
+  // in one call, so a killed runner is "dead" on either kind of platform.
+  const src = readFileSync(new URL("../src/jobs.ts", import.meta.url), "utf-8");
+  assert.match(src, /"-o", "state=,args="/);
+  assert.match(src, /info\.state\.startsWith\("Z"\)/);
+  assert.doesNotMatch(src, /function isZombie/);
+});
+
+test("cancel reports success when the runner records just after the window", async () => {
+  const marker = join(tmpDir, "late-record-finished");
+  const kiro = join(tmpDir, "late-kiro");
+  // Ignores SIGTERM, so the runner's own record cannot land inside the settle
+  // window and cancel has to escalate and then write the record itself.
+  writeFileSync(kiro, `#!/bin/sh\ntrap '' TERM\necho started\nsleep 8\ntouch "${marker}"\n`, { mode: 0o755 });
+  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
+  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
+  await new Promise((r) => setTimeout(r, 400));
+  const out = run(["cancel", jobId]).stdout;
+  assert.match(out, /Cancelled job/, out);
+  assert.doesNotMatch(out, /nothing to cancel/);
+  await new Promise((r) => setTimeout(r, 9000));
+  assert.equal(existsSync(marker), false, "kiro-cli survived");
+});

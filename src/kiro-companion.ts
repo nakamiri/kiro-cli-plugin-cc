@@ -5,7 +5,7 @@ import { type Job, type PidVerdict, classifyPid, isPidAlive, listJobs, loadJob, 
 import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
 
 export type { Job };
-export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidArgv, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
+export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidInfo, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
 export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
@@ -268,6 +268,15 @@ function startRunner(kind: string, kiro: string, prompt: string, timeoutMs: numb
 /** Slack over the runner's own budget before this side stops waiting. */
 const FOREGROUND_WAIT_SLACK_MS = 10_000;
 const FOREGROUND_POLL_MS = 200;
+/**
+ * How often the wait pays for a full reconciling read. The cheap liveness check
+ * below catches a runner whose pid is recorded and verifiably dead, but not one
+ * whose pid was never recorded, nor a recycled pid -- and in both of those the
+ * wait used to run the whole budget out and report a timeout that never
+ * happened. Reconciling on a schedule closes that without forking ps five times
+ * a second on the platforms where the identity probe costs a process.
+ */
+const FOREGROUND_RECONCILE_MS = 5_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -282,6 +291,7 @@ function sleep(ms: number): Promise<void> {
  */
 async function awaitResult(id: string, timeoutMs: number): Promise<string> {
   const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
+  let nextReconcile = Date.now() + FOREGROUND_RECONCILE_MS;
   for (;;) {
     // Raw: the reconciling read runs a full identity probe, which forks ps on
     // every platform without /proc -- around 1500 times over a long review.
@@ -289,8 +299,12 @@ async function awaitResult(id: string, timeoutMs: number): Promise<string> {
     let job: Job | null;
     try {
       job = loadJobRaw(id);
-      if (job && job.status === "running" && job.pid !== undefined && !isPidAlive(job.pid)) {
-        job = loadJob(id);
+      if (job && job.status === "running") {
+        const pidIsGone = job.pid !== undefined && !isPidAlive(job.pid);
+        if (pidIsGone || Date.now() >= nextReconcile) {
+          nextReconcile = Date.now() + FOREGROUND_RECONCILE_MS;
+          job = loadJob(id);
+        }
       }
     } catch {
       // Transient: one failed read is not the record going away, and giving up
@@ -626,7 +640,9 @@ export function cancel(args: string[]): string {
     return `Job ${job.id} no longer exists; nothing was recorded.`;
   }
   if (base.status !== "running") {
-    return `Job ${job.id} is already ${base.status}; nothing to cancel.`;
+    // The runner's own record landed just outside the settle window -- routine
+    // on a loaded host. We did stop it, so this is a success, not a refusal.
+    return `Cancelled job ${job.id} (recorded as ${base.status})`;
   }
   saveJob({ ...base, status: "cancelled", finishedAt: new Date().toISOString() });
   return `Cancelled job ${job.id}`;
