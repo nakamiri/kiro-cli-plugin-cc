@@ -7,6 +7,12 @@ allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 
 Raw slash-command arguments: $ARGUMENTS
 
+Before building any command line, check the `--base` ref if one was given: it
+must match `^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$` (`main`, `origin/main`, `v1.2.3`,
+`HEAD~3`). If it does not, run nothing at all and tell the user it is not a
+usable git ref. Both this command's Bash rules are pre-approved, so an unchecked
+ref would run without a permission prompt.
+
 Core constraint:
 - This command is review-only.
 - Do not fix issues, apply patches, or suggest that you are about to make changes.
@@ -15,11 +21,14 @@ Core constraint:
 Choose the execution mode **before** running anything:
 - `--wait` present: run in the foreground.
 - `--background` present: forward it to the script.
-- Neither: check the size of the change first with `git diff --stat HEAD` (or
-  against the `--base` ref if one was given). Plain `git diff --stat` shows only
-  unstaged work, so a fully staged change reads as nothing at all. Beyond 1-2
-  files, add `--background` to the arguments and tell the user why. Otherwise
-  run in the foreground.
+- Neither: check the size of the change first with exactly
+  `git diff --stat HEAD` -- that literal command, never with the user's `--base`
+  ref substituted into it. `allowed-tools` pre-approves `Bash(git:*)`, so an
+  unchecked ref there would run without a permission prompt, and this is only an
+  estimate of how much has changed. (Plain `git diff --stat`, without `HEAD`,
+  shows only unstaged work, so a fully staged change reads as nothing at all.)
+  Beyond 1-2 files, add `--background` to the arguments and tell the user why.
+  Otherwise run in the foreground.
 
 "Background" here always means passing `--background` to the script, never the
 `Bash` tool's `run_in_background`: the script detaches the job itself and needs
@@ -60,10 +69,9 @@ word-split and expanded. The heredoc body is not interpreted at all, so there is
 nothing to get wrong. Never wrap the arguments in a command substitution.
 
 The `--base` ref is the one piece of user input that has to stay on the command
-line, so check it first: it must match `^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$`
-(`main`, `origin/main`, `v1.2.3`, `HEAD~3`). If it does not, run nothing and tell
-the user it is not a usable git ref. The script rejects anything else too, but
-the check belongs before the command line is built, not after.
+line, which is why it is checked before anything is built (see the top of this
+file). The script rejects anything outside that set too, but by then the command
+line has already been assembled.
 
 A foreground review runs until the script's own budget expires, and the script
 waits a little beyond that before giving up, so the `Bash` tool timeout has to

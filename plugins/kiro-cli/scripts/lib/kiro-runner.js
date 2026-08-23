@@ -226,7 +226,11 @@ function settle(code, signal) {
     if (escapeTimer)
         clearTimeout(escapeTimer);
     const output = collected();
-    if (timedOut) {
+    // A child that exited on its own reports a code and no signal, so it beat the
+    // deadline however close it was -- a run that finished successfully a moment
+    // before the timer fired was being recorded as a timeout. Only a killed or
+    // unaccounted-for child is treated as timed out.
+    if (timedOut && !(code !== null && signal === null)) {
         finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`);
         return;
     }

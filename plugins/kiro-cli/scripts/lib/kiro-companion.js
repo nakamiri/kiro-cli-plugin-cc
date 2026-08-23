@@ -208,7 +208,19 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
             }
             catch { /* already gone */ }
         }
-        return `ERROR: started the Kiro runner but could not record it, so it was stopped: ${e.message}`;
+        const detail = `ERROR: started the Kiro runner but could not record it, so it was stopped: ${e.message}`;
+        // Leave a terminal record, as the two sibling spawn-failure paths do.
+        // Without it the pre-spawn record stayed a pid-less "running": a phantom job
+        // in status for the whole launch window, refused by cancel as "still
+        // starting", exempt from every retention budget, and finally reconciled with
+        // a "never started" note that was not what happened.
+        try {
+            saveJob({ ...job, pid: undefined, status: "failed", finishedAt: new Date().toISOString(), note: detail });
+        }
+        catch {
+            /* the store is what failed in the first place */
+        }
+        return detail;
     }
     return job;
 }

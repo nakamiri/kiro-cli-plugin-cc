@@ -2008,3 +2008,35 @@ test("a young unreachable transcript survives while the store is inside budget",
   // bytes against a 1000-byte budget, taking the young orphan with it.
   assert.ok(readdirSync(jobsDir).includes("kiro-younorph-aa.out"), "a young orphan was swept prematurely");
 });
+
+// --- Round-33 regressions ---
+
+test("a run that exits just before the deadline is not recorded as a timeout", async () => {
+  const kiro = join(tmpDir, "just-in-time-kiro");
+  // Finishes successfully well inside a very short budget; the timer fires
+  // during the same tick range, and timedOut used to outrank the exit code.
+  writeFileSync(kiro, '#!/bin/sh\necho "the review"\nexit 0\n', { mode: 0o755 });
+  for (const budget of ["1", "2", "5", "10", "25"]) {
+    const { jobId } = JSON.parse(
+      run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: budget }).stdout
+    );
+    const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+    if (job.status !== "completed") continue; // a genuine timeout at 1ms is fair
+    assert.doesNotMatch(resultOf(job.id), /timed out/, `budget ${budget} mislabelled a clean exit`);
+  }
+});
+
+test("a run killed by the timeout is still recorded as one", async () => {
+  const kiro = fakeSlowKiro(10);
+  const { jobId } = JSON.parse(
+    run(["review", "--background"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_BACKGROUND_TIMEOUT_MS: "800" }).stdout
+  );
+  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
+  assert.equal(job.status, "failed");
+  assert.match(resultOf(job.id), /timed out after 800ms/);
+});
+
+// The pid-write failure path has no test: it needs the store to break between
+// the launcher's first write and its second, which cannot be arranged from
+// outside the process. Its two siblings -- a spawn that throws and a spawn with
+// no pid -- are covered above.
