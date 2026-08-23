@@ -20,7 +20,6 @@ import { readFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { loadJobRaw, saveJob, saveJobResult } from "./jobs.js";
 import { flushGraceMs, maxOutputBytes } from "./kiro.js";
-import { installAgent, isKind, removeAgent } from "./agents.js";
 const [jobId, timeoutArg, kiroPath, ...kiroArgs] = process.argv.slice(2);
 if (!jobId || !timeoutArg || !kiroPath) {
     console.error("kiro-runner: usage: kiro-runner.js <jobId> <timeoutMs> <kiroPath> [kiroArgs...]");
@@ -32,22 +31,6 @@ const timeoutMs = Math.floor(Number(timeoutArg));
 if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
     console.error(`kiro-runner: timeoutMs must be a positive integer, got ${timeoutArg}`);
     process.exit(2);
-}
-/**
- * The run's agent config, on the v3 engine. This process installs it and this
- * process removes it: it is the only one that lives for exactly as long as
- * kiro-cli does, so anywhere else the file would either appear before it was
- * needed or outlast the run that owned it. Every terminal path goes through
- * teardown(), including the signal handlers and the last-resort bail-out, so a
- * cancelled or timed-out run leaves the working directory as it found it.
- */
-let installedAgent;
-function agentTeardown() {
-    if (installedAgent === undefined)
-        return;
-    const done = installedAgent;
-    installedAgent = undefined;
-    removeAgent(done);
 }
 /**
  * kiro-cli may leave a descendant holding its stdout open after exiting, and
@@ -139,11 +122,6 @@ function leadsOwnGroup() {
     }
 }
 function sweepGroup() {
-    // Before the group kill, not after: that kill includes this process, so
-    // anything left until later would never run. Every path that ends this
-    // process goes through here, which is what makes the config's lifetime the
-    // run's lifetime -- completed, failed, cancelled, timed out or bailed out.
-    agentTeardown();
     let swept = false;
     if (leadsOwnGroup()) {
         try {
@@ -250,35 +228,6 @@ function bailOut(what, err) {
 }
 process.on("uncaughtException", (err) => { bailOut("uncaught exception", err); });
 process.on("unhandledRejection", (err) => { bailOut("unhandled rejection", err); });
-// The config has to exist before kiro-cli reads it and must not exist any longer
-// than that, so it is written here, one statement before the spawn. `--agent`
-// names it; the kind comes from the record rather than from argv, so the two
-// sides cannot disagree about which config a job is running under.
-if (kiroArgs.includes("--v3")) {
-    const record = (() => {
-        try {
-            return loadJobRaw(jobId);
-        }
-        catch {
-            return null;
-        }
-    })();
-    const kind = record?.kind;
-    if (kind === undefined || !isKind(kind)) {
-        // Refused rather than run: an unknown agent name makes kiro-cli warn on
-        // stderr and fall back to its default agent, which is unrestricted. A run
-        // that cannot be given its permissions must not proceed as though it had.
-        bailOut("could not determine what this job is", new Error(`job ${jobId} has no usable kind`));
-    }
-    else {
-        try {
-            installedAgent = installAgent(kind, jobId, process.cwd());
-        }
-        catch (e) {
-            bailOut("could not install the agent config for this run", e);
-        }
-    }
-}
 let child;
 try {
     child = spawn(kiroPath, kiroArgs, { stdio: ["ignore", "pipe", "pipe"] });

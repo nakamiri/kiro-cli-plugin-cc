@@ -1,14 +1,37 @@
 import { execFileSync } from "node:child_process";
 
 /**
+ * The tools each command may use, and nothing else.
+ *
+ * `review` gets fs_read alone. Verified against kiro-cli 2.19.1 under --v3: a
+ * read succeeds, a write is refused and the file is not created, and a shell
+ * command is refused with "tool permission approval is not supported in
+ * non-interactive mode". There is no command surface at all, which is the only
+ * form of this that can be shown to hold -- an earlier attempt allowed the shell
+ * for `git diff*` patterns, and `git diff --output=FILE` matches that glob and
+ * writes a file. A review therefore cannot obtain its own diff, so the plugin
+ * produces it (see reviewContext in kiro-companion.ts).
+ *
+ * `rescue` is asked to change the repository, so it gets the write and the
+ * shell. That is the same blast radius as the trust-all flag, and naming the
+ * three is not offered as a reduction of it: a shell allowance is arbitrary
+ * command execution. What it does exclude is everything else kiro-cli might be
+ * configured with -- MCP tools especially -- which a fix has no business
+ * reaching.
+ */
+const TOOLS_BY_KIND: Record<string, readonly string[]> = {
+  review: ["fs_read"],
+  rescue: ["fs_read", "fs_write", "execute_bash"],
+};
+
+/**
  * Kiro is given full tool trust when the variable is unset, which is the
  * documented default. Once it is set, only an explicitly affirmative value
  * keeps trust on: an unrecognised value such as "off" or "disabled" clearly
  * means the operator wanted trust reduced, so fail closed rather than open.
  *
- * This applies to the v2 engine only. Under v3 what Kiro may do is declared by
- * the run's agent config instead, which can say "read the repository and run
- * read-only git" -- something no combination of trust flags can express.
+ * This applies to the v2 engine only. Under v3 each command is given the tools
+ * it needs and no others, which no combination of trust flags can express on v2.
  */
 export function trustAllTools(): boolean {
   const v = process.env.KIRO_PLUGIN_TRUST_ALL_TOOLS;
@@ -21,27 +44,26 @@ export type AgentEngine = "v2" | "v3";
 /**
  * Which kiro-cli agent engine to run.
  *
- * v3 by default, because it is the only one whose permission rules actually
- * bite: on v2 the same rules are accepted and silently ignored, so a config that
- * reads as a restriction is not one. v2 remains reachable for anyone whose
- * kiro-cli predates the engine or who wants the old blanket trust back, and it
- * behaves exactly as it always did -- `--trust-all-tools`, nothing else.
+ * v3 by default, because per-tool trust only takes effect there. v2 remains
+ * reachable for anyone whose kiro-cli predates the engine, and behaves exactly
+ * as it always did -- `--trust-all-tools`, nothing else.
  */
 export function agentEngine(): AgentEngine {
   const v = process.env.KIRO_PLUGIN_AGENT_ENGINE?.trim().toLowerCase();
   return v === "v2" ? "v2" : "v3";
 }
 
-/**
- * The argv for a Kiro run. `agent` is the name of the config installed for this
- * run, and is required on v3: without it kiro-cli would fall back to the default
- * agent, which is unrestricted.
- */
-export function chatArgs(prompt: string, agent?: string): string[] {
+/** What `kind` is allowed to do, for `setup` to report and tests to pin. */
+export function toolsFor(kind: string): readonly string[] {
+  return TOOLS_BY_KIND[kind] ?? [];
+}
+
+export function chatArgs(prompt: string, kind: string): string[] {
   const args = ["chat", "--no-interactive"];
   if (agentEngine() === "v3") {
-    if (agent === undefined) throw new Error("the v3 engine needs an agent config for the run");
-    args.push("--v3", "--agent", agent);
+    // The flag is always passed, empty list included: omitting it means Kiro asks
+    // for confirmation, and under --no-interactive there is nobody to ask.
+    args.push("--v3", `--trust-tools=${toolsFor(kind).join(",")}`);
   } else if (trustAllTools()) {
     args.push("--trust-all-tools");
   }

@@ -148,10 +148,16 @@ test("a foreground timeout takes kiro-cli's descendants with it", async () => {
     { mode: 0o755 }
   );
   const started = Date.now();
-  // The sweep lands at timeout + flush grace, so the grace is pinned short and
-  // the descendant made long. On the defaults the two were 2.8s and 4.0s apart,
-  // and 1.2s of margin did not survive node:test running the files in parallel:
-  // this assertion failed for real there while passing on its own.
+  // The group sweep lands at timeout plus flush grace, so the grace is pinned
+  // short and the descendant made long. On the defaults the two were 2.8s and
+  // 4.0s apart, and 1.2s of margin did not survive node:test running the files in
+  // parallel: this assertion failed for real there while passing on its own.
+  //
+  // The margin is what decides it. An earlier attempt to explain the flake by
+  // `sweepGroup` asking `ps` whether it leads its own group -- and treating an
+  // unreadable answer as "no", skipping the group kill -- did not hold up: the
+  // launcher now tells the runner outright, and the assertion still failed once in
+  // three runs without the widened margin.
   const r = run(["review"], {
     KIRO_CLI_PATH: kiro,
     KIRO_PLUGIN_TIMEOUT_MS: "800",
@@ -387,67 +393,63 @@ test("a verified live runner is trusted however long it has been running", () =>
 });
 
 
-// --- the run's agent config, which is what keeps a review read-only ---
-//
-// agents.test.mjs covers what the config says and that install/remove behave.
-// What only a real run can show is that the file is on disk at the moment
-// kiro-cli reads it, and gone once the run is over -- whichever way it ends.
+// --- what each command is trusted with ---
 
-/** A fake kiro-cli that reports the agent configs it can see, then exits. */
-function fakeKiroListingAgents(extra = "") {
-  const path = join(dirs.tmp, "listing-kiro");
-  writeFileSync(
-    path,
-    `#!/bin/sh\nfor f in .kiro/agents/*.json; do [ -e "$f" ] && echo "SAW:$f"; done\n${extra}`,
-    { mode: 0o755 },
-  );
-  return path;
-}
-
-test("the run's agent config is there while kiro-cli runs, and gone once it ends", async () => {
-  const kiro = fakeKiroListingAgents();
-  const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);
-  const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
-  assert.equal(job.status, "completed");
-  // kiro-cli saw it: the file exists by the time it is started, not later.
-  assert.match(resultOf(job.id), new RegExp(`SAW:\\.kiro/agents/kiro-plugin-review-${jobId}\\.json`),
-    `kiro-cli could not see its own config: ${resultOf(job.id)}`);
-  // And the checkout is as it was. An unknown --agent makes kiro-cli fall back to
-  // its unrestricted default, so a config left lying about is not harmless: the
-  // next run would name a config that is not the one on disk.
-  assert.equal(existsSync(join(dirs.tmp, ".kiro")), false, `left behind: ${readdirSync(dirs.tmp)}`);
-});
-
-test("a cancelled run takes its agent config with it", async () => {
-  // Teardown runs from the signal handler as well as from the ordinary finish,
-  // so a run that is stopped part way through still cleans up after itself.
-  const kiro = fakeKiroListingAgents("sleep 30\n");
-  const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
-  await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
-  const config = join(dirs.tmp, ".kiro", "agents", `kiro-plugin-rescue-${jobId}.json`);
-  for (let i = 0; i < 100 && !existsSync(config); i++) await new Promise((r) => setTimeout(r, 50));
-  assert.ok(existsSync(config), "the config was never written");
-
-  assert.match(run(["cancel", jobId]).stdout, /Cancelled job/);
-  await waitForJob((j) => j.id === jobId && j.status !== "running", 10_000);
-  for (let i = 0; i < 100 && existsSync(config); i++) await new Promise((r) => setTimeout(r, 50));
-  assert.equal(existsSync(config), false, "a cancelled run left its config behind");
-});
-
-test("the v2 engine trusts every tool and writes no config", async () => {
-  // The old behaviour, unchanged and still reachable: one flag, all or nothing,
-  // and nothing written into the working directory.
+test("v3 gives review the read tool and nothing else; v2 trusts everything", () => {
+  // The mechanism as it reaches kiro-cli. What those tools then permit is
+  // kiro-cli's to enforce, and was established against the real binary by hand:
+  // with fs_read alone a read succeeds, a write is refused and the file is not
+  // created, and a shell command is refused outright. A fake kiro-cli can only
+  // report the argv it was handed, so that is what this pins.
   const kiro = fakeEchoKiro();
-  // The product default for the trust flag, which the harness otherwise turns
-  // off: on v2 that flag is the whole mechanism, so this is the one place that
-  // has to see it as a user would.
-  const r = run(["review"], {
+  const v3 = run(["review"], { KIRO_CLI_PATH: kiro });
+  assert.match(v3.stdout, /^ARG:--v3$/m);
+  assert.match(v3.stdout, /^ARG:--trust-tools=fs_read$/m);
+  assert.doesNotMatch(v3.stdout, /^ARG:--trust-all-tools$/m);
+  // Nothing is written into the working directory, on either engine.
+  assert.equal(existsSync(join(dirs.tmp, ".kiro")), false, "a run wrote into the working directory");
+
+  const rescue = run(["rescue", "fix it"], { KIRO_CLI_PATH: kiro });
+  assert.match(rescue.stdout, /^ARG:--trust-tools=fs_read,fs_write,execute_bash$/m);
+
+  // The old behaviour, unchanged and still reachable: one flag, all or nothing.
+  // The harness turns the trust variable off, so this is the one place that has
+  // to see the product default as a user would.
+  const v2 = run(["review"], {
     KIRO_CLI_PATH: kiro,
     KIRO_PLUGIN_AGENT_ENGINE: "v2",
     KIRO_PLUGIN_TRUST_ALL_TOOLS: null,
   });
-  assert.match(r.stdout, /^ARG:--trust-all-tools$/m);
-  assert.doesNotMatch(r.stdout, /^ARG:--v3$/m);
-  assert.doesNotMatch(r.stdout, /^ARG:--agent$/m);
-  assert.equal(existsSync(join(dirs.tmp, ".kiro")), false, "v2 wrote an agent config");
+  assert.match(v2.stdout, /^ARG:--trust-all-tools$/m);
+  assert.doesNotMatch(v2.stdout, /^ARG:--v3$/m);
+  assert.doesNotMatch(v2.stdout, /^ARG:--trust-tools/m);
+});
+
+test("a v3 review is handed the diff, because it has no way to fetch one", () => {
+  // fs_read cannot run git, so the plugin runs it. Without this a review would be
+  // asked to compare against a ref it has no means of seeing.
+  const kiro = fakeEchoKiro();
+  const git = (...args) => spawnSync("git", args, { cwd: dirs.tmp, encoding: "utf-8" });
+  git("init", "-q", ".");
+  writeFileSync(join(dirs.tmp, "tracked.txt"), "first\n");
+  git("add", "tracked.txt");
+  git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+  writeFileSync(join(dirs.tmp, "tracked.txt"), "first\nsecond\n");
+  writeFileSync(join(dirs.tmp, "brand-new.txt"), "not in the diff\n");
+
+  const r = run(["review"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /\+second/, `the diff was not included: ${r.stdout.slice(0, 400)}`);
+  // Untracked files are absent from `git diff` entirely, so they are named for
+  // Kiro to go and read rather than silently skipped.
+  assert.match(r.stdout, /brand-new\.txt/);
+});
+
+test("a review outside a repository says so instead of implying a diff", () => {
+  // No git, not a checkout, or a ref that does not resolve. Kiro can still read
+  // files, so the run is worth making -- but not while suggesting it was given a
+  // diff it never had.
+  const kiro = fakeEchoKiro();
+  const r = run(["review"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /could not be produced here/);
+  assert.doesNotMatch(r.stdout, /```diff/);
 });

@@ -1,15 +1,9 @@
 import { execFileSync, spawn } from "node:child_process";
-import { readSync, statSync } from "node:fs";
+import { readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyPid, isPidAlive, listJobs, loadJob, loadJobRaw, pruneJobs, readJobResult, saveJob } from "./jobs.js";
-import { agentEngine, backgroundTimeoutMs, cancelSettleMs, chatArgs, findKiro, foregroundReconcileMs, foregroundTimeoutMs, nodeBinary, stdinStallMs, trustAllTools, versionProbeTimeoutMs } from "./kiro.js";
-import { agentName, describeRules, isKind, sweepStaleAgents } from "./agents.js";
-/**
- * How old an agent config has to be before it is treated as abandoned. Longer
- * than any run's budget plus its slack, so this can only ever catch a config
- * whose runner is gone -- a live run's config is never eligible.
- */
-const STALE_AGENT_MS = 24 * 60 * 60 * 1000;
+import { agentEngine, toolsFor, backgroundTimeoutMs, cancelSettleMs, chatArgs, findKiro, foregroundReconcileMs, foregroundTimeoutMs, nodeBinary, stdinStallMs, trustAllTools, versionProbeTimeoutMs } from "./kiro.js";
 export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidInfo, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
 export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
 const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
@@ -51,7 +45,13 @@ export function splitArgs(args) {
         return { flags: args, literal: "" };
     return { flags: args.slice(0, sep), literal: args.slice(sep + 1).join(" ") };
 }
-export function buildReviewPrompt(rawArgs) {
+/**
+ * The ref to compare against and the focus text, from one pass over the
+ * arguments. Split out from buildReviewPrompt because `review` needs the ref on
+ * its own -- it runs `git diff <ref>` itself now -- and parsing it twice would be
+ * two places for the validation to drift.
+ */
+export function reviewArgs(rawArgs) {
     const { flags: args, literal } = splitArgs(rawArgs);
     let base = "HEAD";
     const filtered = [];
@@ -86,7 +86,10 @@ export function buildReviewPrompt(rawArgs) {
         }
         filtered.push(a);
     }
-    const extra = [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
+    return { base, extra: [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ") };
+}
+export function buildReviewPrompt(rawArgs) {
+    const { base, extra } = reviewArgs(rawArgs);
     let prompt = `Review the code changes. Compare against ${base}.`;
     // Terminated, so the focus text does not run into the next sentence of the
     // prompt -- but only when it does not already end a sentence itself, or
@@ -156,26 +159,9 @@ function startRunner(kind, kiro, prompt, timeoutMs) {
     saveJob(job);
     // Once per job, which is the natural point to keep the store bounded.
     pruneJobs();
-    // And to clear configs left by a run that was killed before it could tear its
-    // own down. Age-guarded, so a config belonging to a job still in flight is not
-    // taken away from it; only names this plugin generates are ever removed.
-    if (agentEngine() === "v3") {
-        try {
-            sweepStaleAgents(process.cwd(), STALE_AGENT_MS, (p) => statSync(p).mtimeMs);
-        }
-        catch {
-            /* housekeeping must not be able to fail a job */
-        }
-    }
-    // On v3 the run's permissions come from a config named here and written by
-    // the runner just before it starts kiro-cli -- it owns the run's lifetime, so
-    // it is also what removes the config again. The name has to be agreed on both
-    // sides without either waiting for the other, which is why it is derived from
-    // the job id rather than passed back.
-    const agent = agentEngine() === "v3" && isKind(kind) ? agentName(kind, job.id) : undefined;
     let child;
     try {
-        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt, agent)], {
+        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt, kind)], {
             stdio: "ignore",
             detached: true,
             // Told, rather than left to work out for itself at teardown: this is what
@@ -391,9 +377,9 @@ export function setup(args) {
         // What each command may do. On v3 this is the run's agent config, written
         // into .kiro/agents/ for the duration of the run and removed afterwards; on
         // v2 there is no way to say less than "everything" or nothing at all.
-        permissions: engine === "v3"
-            ? { review: describeRules("review"), rescue: describeRules("rescue") }
-            : { all: trustAllTools() ? ["every tool (--trust-all-tools)"] : ["no tools"] },
+        tools: engine === "v3"
+            ? { review: toolsFor("review"), rescue: toolsFor("rescue") }
+            : { all: trustAllTools() ? ["every tool (--trust-all-tools)"] : [] },
         trustAllTools: engine === "v2" && trustAllTools(),
         foregroundTimeoutMs: foreground,
         // What a caller must allow a foreground run, budget plus this side's own
@@ -430,20 +416,82 @@ export function setup(args) {
         return `❌ kiro-cli was found at ${info.path} but could not be run.\n  Error: ${info.error}\n\nCheck the path (KIRO_CLI_PATH) and that the file is executable.`;
     }
     const trust = info.agentEngine === "v3"
-        ? "per-command, from a run-scoped agent config (v3 engine)\n" +
-            `    review: ${describeRules("review").join("\n            ")}\n` +
-            `    rescue: ${describeRules("rescue").join("\n            ")}\n` +
-            "    Written to .kiro/agents/ when a run starts, removed when it ends."
+        ? "per command (v3 engine)\n" +
+            `    review: ${toolsFor("review").join(", ")} -- reads only; the diff is produced by this plugin\n` +
+            `    rescue: ${toolsFor("rescue").join(", ")}`
         : info.trustAllTools
-            ? "all tools trusted (v2 engine; unset KIRO_PLUGIN_AGENT_ENGINE for per-command rules)"
+            ? "all tools trusted (v2 engine; unset KIRO_PLUGIN_AGENT_ENGINE for per-command tools)"
             : "no tool trust -- Kiro runs non-interactively, so it can analyse but not change anything";
     return (`✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n` +
         `  Tool trust: ${trust}\n` +
         `  Foreground budget: ${info.foregroundTimeoutMs}ms ` +
         `(allow ${info.recommendedBashTimeoutMs}ms for a foreground run)`);
 }
+/**
+ * The change under review, gathered by this plugin rather than by Kiro.
+ *
+ * A review is given no shell, so it cannot fetch its own diff -- which is the
+ * point: a shell allowance wide enough to run `git diff` is wide enough to write
+ * files through it. git is run here with execFile, no shell, and the ref has
+ * already been through isSafeRef.
+ *
+ * Capped, because the prompt becomes a single argv entry and Linux limits one of
+ * those to 128KB; past the cap Kiro is told what was cut and can read the files
+ * itself. Untracked files are listed rather than included: they are absent from
+ * `git diff` entirely, and a review that silently skipped a whole new file would
+ * be worse than one that knows to go and read it.
+ */
+const MAX_DIFF_BYTES = 64 * 1024;
+function gitText(args) {
+    try {
+        return execFileSync("git", args, {
+            encoding: "utf-8",
+            maxBuffer: 32 * 1024 * 1024,
+            // Short on purpose. This runs inside a foreground review, so a git that is
+            // not answering should turn into "no diff available" quickly rather than
+            // holding the caller; the run is still worth making, since Kiro can read
+            // files. Seen taking tens of seconds under a heavily loaded machine.
+            timeout: 5_000,
+            killSignal: "SIGKILL",
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+    }
+    catch {
+        return null;
+    }
+}
+export function reviewContext(base) {
+    const diff = gitText(["diff", "--no-color", base]);
+    if (diff === null) {
+        // Not a repository, no git, or a ref that does not resolve. Say so instead of
+        // implying a diff was considered: Kiro can still read the tree.
+        return `\n\nThe diff against ${base} could not be produced here (this may not be a git repository, or ${base} may not resolve). Read the files you need directly.`;
+    }
+    const untracked = (gitText(["ls-files", "--others", "--exclude-standard"]) ?? "")
+        .split("\n").filter(Boolean);
+    let body = diff.trim() === "" ? "" : diff;
+    let note = "";
+    if (Buffer.byteLength(body) > MAX_DIFF_BYTES) {
+        body = new StringDecoder("utf-8").write(Buffer.from(body, "utf-8").subarray(0, MAX_DIFF_BYTES));
+        note = `\n[diff truncated at ${MAX_DIFF_BYTES} bytes -- read the files directly for the rest]`;
+    }
+    const parts = [];
+    if (body === "")
+        parts.push(`\n\nThere are no tracked changes against ${base}.`);
+    else
+        parts.push(`\n\nThe diff against ${base} follows. You have no shell, so this is the diff; you can read any file in the repository.\n\n\`\`\`diff\n${body}${note}\n\`\`\``);
+    if (untracked.length > 0) {
+        parts.push(`\n\nUntracked files, which are not in the diff -- read them if they are part of the change:\n${untracked.map((f) => `- ${f}`).join("\n")}`);
+    }
+    return parts.join("");
+}
 export function review(args) {
-    return runKiro("review", buildReviewPrompt(args), wantsBackground(args));
+    // The prompt keeps saying which ref is being compared, so buildReviewPrompt is
+    // unchanged and stays pure; the evidence is appended here.
+    const prompt = agentEngine() === "v3"
+        ? buildReviewPrompt(args) + reviewContext(reviewArgs(args).base)
+        : buildReviewPrompt(args);
+    return runKiro("review", prompt, wantsBackground(args));
 }
 export async function rescue(args) {
     const task = buildRescuePrompt(args);

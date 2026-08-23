@@ -26,12 +26,11 @@ import {
   jobTtlMs,
   maxOutputBytes,
   maxRetainedJobs,
+  toolsFor,
   trustAllTools,
 } from "../plugins/kiro-cli/scripts/lib/kiro.js";
 import { isValidJobId, reconcile } from "../plugins/kiro-cli/scripts/lib/jobs.js";
 
-/** A stand-in for the run-scoped agent name the launcher derives from the job. */
-const AGENT = "kiro-plugin-review-kiro-aaaa0000-aa";
 
 /** Runs `fn` with the given env vars set, restoring whatever was there before. */
 function withEnv(vars, fn) {
@@ -150,7 +149,7 @@ test("rescue with no task refuses instead of inventing one", async () => {
 test("a multi-line task keeps its newlines and indentation", () => {
   const task = "line one\n  indented two\nline three";
   assert.equal(buildRescuePrompt(["--", task]), task);
-  assert.equal(chatArgs(buildRescuePrompt(["--", task]), AGENT).at(-1), task);
+  assert.equal(chatArgs(buildRescuePrompt(["--", task]), "rescue").at(-1), task);
 });
 
 // --- literal text after `--` (how free-form text arrives) ---
@@ -211,7 +210,7 @@ test("the prompt is one trailing argv entry, verbatim", () => {
     "line one\n  indented two",
     "a'b",
   ]) {
-    const args = chatArgs(prompt, AGENT);
+    const args = chatArgs(prompt, "review");
     assert.equal(args.at(-1), prompt, `mangled: ${JSON.stringify(prompt)}`);
     assert.equal(args.filter((a) => a === prompt).length, 1);
   }
@@ -219,9 +218,9 @@ test("the prompt is one trailing argv entry, verbatim", () => {
 
 test("a -- separator is emitted only for a prompt that starts with a dash", () => {
   // "--verbose builds are broken" would otherwise be parsed as an option.
-  const dashed = chatArgs("--verbose is broken", AGENT);
+  const dashed = chatArgs("--verbose is broken", "review");
   assert.deepEqual(dashed.slice(-2), ["--", "--verbose is broken"]);
-  assert.equal(chatArgs("tests are failing", AGENT).includes("--"), false);
+  assert.equal(chatArgs("tests are failing", "review").includes("--"), false);
 });
 
 test("the v2 engine keeps the blanket trust flag, and fails closed", () => {
@@ -230,35 +229,42 @@ test("the v2 engine keeps the blanket trust flag, and fails closed", () => {
   // wanted trust reduced, so it goes to nothing rather than to everything.
   const v2 = (env, fn) => withEnv({ KIRO_PLUGIN_AGENT_ENGINE: "v2", ...env }, fn);
   assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: null }, trustAllTools), true);
-  assert.ok(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: null }, () => chatArgs("x")).includes("--trust-all-tools"));
+  assert.ok(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: null }, () => chatArgs("x", "review")).includes("--trust-all-tools"));
   for (const v of ["off", "FALSE", "disabled", "0", "no", ""]) {
     assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, trustAllTools), false, `trust survived ${JSON.stringify(v)}`);
-    assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, () => chatArgs("x")).includes("--trust-all-tools"), false);
+    assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, () => chatArgs("x", "review")).includes("--trust-all-tools"), false);
   }
   for (const v of ["1", "true", "YES", "on", " on "]) {
     assert.equal(v2({ KIRO_PLUGIN_TRUST_ALL_TOOLS: v }, trustAllTools), true, `trust lost for ${JSON.stringify(v)}`);
   }
   // Non-interactive either way, so trust off is a Kiro that can read but not act.
-  assert.equal(v2({}, () => chatArgs("x"))[1], "--no-interactive");
-  assert.equal(v2({}, () => chatArgs("x")).includes("--v3"), false);
+  assert.equal(v2({}, () => chatArgs("x", "review"))[1], "--no-interactive");
+  assert.equal(v2({}, () => chatArgs("x", "review")).includes("--v3"), false);
 });
 
-test("the v3 engine names the run's agent instead of trusting everything", () => {
-  const args = withEnv({ KIRO_PLUGIN_AGENT_ENGINE: null }, () => chatArgs("x", AGENT));
+test("the v3 engine trusts only the tools its command needs", () => {
+  const args = withEnv({ KIRO_PLUGIN_AGENT_ENGINE: null }, () => chatArgs("x", "review"));
   assert.equal(agentEngine(), "v3", "v3 should be the default");
-  assert.deepEqual(args.slice(0, 5), ["chat", "--no-interactive", "--v3", "--agent", AGENT]);
+  assert.deepEqual(args.slice(0, 4), ["chat", "--no-interactive", "--v3", "--trust-tools=fs_read"]);
   assert.equal(args.includes("--trust-all-tools"), false);
-  // The trust flag has no say here: the rules are in the config, and leaving the
-  // old variable set must not quietly reopen anything.
-  const stillRestricted = withEnv({ KIRO_PLUGIN_TRUST_ALL_TOOLS: "1" }, () => chatArgs("x", AGENT));
+  // review reads and nothing else. It used to be allowed read-only git so it
+  // could fetch its own diff, until `git diff --output=FILE` turned out to match
+  // `git diff*` and write a file; the plugin produces the diff instead.
+  assert.deepEqual(toolsFor("review"), ["fs_read"]);
+  assert.deepEqual(toolsFor("rescue"), ["fs_read", "fs_write", "execute_bash"]);
+  // The trust flag has no say here, so leaving the old variable set cannot
+  // quietly reopen anything.
+  const stillRestricted = withEnv({ KIRO_PLUGIN_TRUST_ALL_TOOLS: "1" }, () => chatArgs("x", "review"));
   assert.equal(stillRestricted.includes("--trust-all-tools"), false);
+  assert.ok(stillRestricted.includes("--trust-tools=fs_read"));
 });
 
-test("a v3 run without an agent is refused, not run unrestricted", () => {
-  // An unknown or absent --agent makes kiro-cli warn on stderr and fall back to
-  // its default agent, which can do anything. Building argv that would do that
-  // is the bug, so it cannot be built.
-  assert.throws(() => withEnv({ KIRO_PLUGIN_AGENT_ENGINE: null }, () => chatArgs("x")), /needs an agent config/);
+test("a command nobody has assigned tools to gets none", () => {
+  // Not reachable from dispatch today, and it fails closed rather than falling
+  // back to something permissive if it ever becomes reachable. The flag is still
+  // passed: omitting it makes Kiro ask, and there is nobody to ask.
+  assert.deepEqual(toolsFor("something-else"), []);
+  assert.ok(withEnv({ KIRO_PLUGIN_AGENT_ENGINE: null }, () => chatArgs("x", "something-else")).includes("--trust-tools="));
 });
 
 test("only v2 is accepted as an opt-out; anything else is v3", () => {
