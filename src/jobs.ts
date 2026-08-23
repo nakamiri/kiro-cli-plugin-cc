@@ -308,8 +308,9 @@ export function pidInfo(pid: number): PidInfo | null {
     if (out === "") return { state: null, argv: [] };
     const [first, ...rest] = out.split(/\s+/);
     // ps gives one string, so argument boundaries are approximated by
-    // whitespace. That is enough here: the two entries this is matched on -- the
-    // runner's path and the job id -- are adjacent and contain no spaces.
+    // whitespace: a prompt can produce entries that look like any other pair.
+    // isRunnerFor takes only the first mention of the script for that reason --
+    // adjacency on its own was forgeable from prompt text here.
     return { state: first ?? null, argv: rest };
   } catch {
     return null;
@@ -337,12 +338,22 @@ export type PidVerdict = "ours" | "foreign" | "dead" | "unknown";
  * line for it instead meant a runner whose prompt happened to mention another
  * job's id was taken for that job -- and on a recycled pid that had cancel
  * signalling the wrong process group while reporting the wrong job stopped.
+ *
+ * Only the *first* mention of the script counts, because the adjacency alone is
+ * still forgeable where argv boundaries are approximated: `ps` returns one
+ * string, so a prompt reading `... kiro-runner.js kiro-victim-aa ...` splits
+ * into exactly the two adjacent entries this matches on, and the same process
+ * then answered "ours" for two different job ids. The runner's own path always
+ * precedes its prompt, so the first mention is the invocation and every later
+ * one is payload.
  */
 function isRunnerFor(argv: string[], jobId: string): boolean {
-  for (let i = 0; i < argv.length - 1; i++) {
-    if (argv[i]!.endsWith("kiro-runner.js") && argv[i + 1] === jobId) return true;
-  }
-  return false;
+  // Not a fixed index: the harnesses invoke the runner through `node -e`, and a
+  // node binary or install path containing a space shifts every position on the
+  // ps path. The first mention is unambiguous without assuming either.
+  const script = argv.findIndex((a) => a.endsWith("kiro-runner.js"));
+  if (script < 0) return false;
+  return argv[script + 1] === jobId;
 }
 
 export function classifyPid(pid: number, jobId: string): PidVerdict {

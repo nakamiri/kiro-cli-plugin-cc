@@ -233,6 +233,27 @@ const TIMEOUT_ESCAPE_MS = 5_000;
 
 let escapeTimer: NodeJS.Timeout | undefined;
 
+/**
+ * Whether the child is provably gone. Only meaningful from the timeout escape
+ * path: reaching it means node never delivered an exit, so a pid that still
+ * answers kill(pid, 0) has not been reaped and the SIGKILL cannot be said to
+ * have landed. EPERM is "still there, under another uid", which is exactly the
+ * case that produced no exit in the first place.
+ */
+function childIsGone(): boolean {
+  const pid = spawned?.pid;
+  if (typeof pid !== "number") return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "EPERM";
+  }
+}
+
+/** Set when the timeout's SIGKILL could not be shown to have landed. */
+let killUnverified: string | null = null;
+
 const timer = setTimeout(() => {
   timedOut = true;
   try { child.kill("SIGKILL"); } catch { /* already gone */ }
@@ -240,7 +261,20 @@ const timer = setTimeout(() => {
   // a process wedged in an uninterruptible wait -- produces no exit and no
   // close, so nothing else here would ever record the outcome or tear the group
   // down. Every other terminal path escalates; this one has to as well.
-  escapeTimer = setTimeout(() => settle(null, "SIGKILL"), TIMEOUT_ESCAPE_MS);
+  escapeTimer = setTimeout(() => {
+    // One more attempt, then check. Recording "timed out" while kiro-cli is
+    // still running is the same overclaim `cancel` refuses to make: the record
+    // reads finished while the process keeps writing to the repository with its
+    // tools trusted. Say so in the transcript instead.
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    if (!childIsGone()) {
+      killUnverified =
+        `WARNING: kiro-cli (pid ${child.pid}) could not be shown to have stopped after SIGKILL, ` +
+        "so it may still be running with its tools trusted. The supervisor sweeps its process " +
+        "group on the way out, but it cannot verify that either -- check for a stray process.";
+    }
+    settle(null, "SIGKILL");
+  }, TIMEOUT_ESCAPE_MS);
 }, timeoutMs);
 
 // setEncoding decodes through a StringDecoder, so a multi-byte character split
@@ -270,7 +304,8 @@ function settle(code: number | null, signal: NodeJS.Signals | null): void {
   // before the timer fired was being recorded as a timeout. Only a killed or
   // unaccounted-for child is treated as timed out.
   if (timedOut && !(code !== null && signal === null)) {
-    finalize("failed", `${output}\n\nERROR: kiro-cli timed out after ${timeoutMs}ms.`);
+    const detail = `ERROR: kiro-cli timed out after ${timeoutMs}ms.`;
+    finalize("failed", killUnverified === null ? `${output}\n\n${detail}` : `${output}\n\n${detail}\n${killUnverified}`);
     return;
   }
   if (signal) {
