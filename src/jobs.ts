@@ -296,6 +296,13 @@ export function classifyPid(pid: number, jobId: string): PidVerdict {
   return cmd.includes("kiro-runner") && cmd.includes(jobId) ? "ours" : "foreign";
 }
 
+/**
+ * Longest a single writeAtomic could plausibly be in flight. Past this a
+ * temporary is abandoned however alive the pid in its name looks, since pids
+ * are recycled and tmpdir survives reboots on some platforms.
+ */
+const TMP_INFLIGHT_MS = 5 * 60_000;
+
 /** Grace over a run's own budget before an unverifiable runner is called stale. */
 const STALE_SLACK_MS = 60_000;
 
@@ -542,18 +549,21 @@ export function pruneJobs(): void {
   const live = new Set<string>();
   const terminal: Job[] = [];
   const transcripts: string[] = [];
-  // Files nothing can read: abandoned writes, and transcripts still inside the
-  // age grace. They are held only in case a young unreadable record recovers.
+  // Transcripts nothing can read, still inside the age grace. They are held
+  // only in case a young unreadable record recovers.
   const strays: string[] = [];
 
   for (const name of names) {
     const tmp = TMP_RE.exec(name);
     if (tmp) {
-      // The name carries the writer's pid. While that process is alive this is
-      // an in-flight writeAtomic, and removing it makes its rename fail with
-      // ENOENT -- a finished run reported as never having recorded a result.
-      // Once the writer is gone the file is abandoned, whatever its age.
-      if (isPidAlive(Number(tmp[1]))) continue;
+      // Protected only while it is plausibly a write in progress: the name
+      // carries the writer's pid, and removing a live writer's temporary makes
+      // its rename fail with ENOENT -- a finished run then reported as never
+      // having recorded a result. Liveness alone is not enough, because a
+      // recycled pid would protect an abandoned file for ever, so it must also
+      // be younger than any single write could take. Anything else is
+      // abandoned and goes now, whatever the budget says.
+      if (isPidAlive(Number(tmp[1])) && ageOf(dir, name) < TMP_INFLIGHT_MS) continue;
       try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
       continue;
     }
@@ -591,8 +601,11 @@ export function pruneJobs(): void {
   for (const job of terminal.slice(maxRetainedJobs())) doomed.add(job.id);
 
   // Then trim by stored bytes: fifty ten-megabyte transcripts are within the
-  // count cap and still make the store unusable. Walking newest-first and
-  // dooming once the budget is exceeded keeps the most recent runs.
+  // count cap and still make the store unusable. Newest-first, keeping each
+  // record that still fits and dropping the ones that do not, so `kept` is the
+  // size of what actually survives. Accumulating the doomed ones too overstated
+  // it, which then made the stray sweep below fire on a store well inside its
+  // budget.
   const byteBudget = maxRetainedJobBytes();
   let kept = 0;
   let keptAny = false;
@@ -609,8 +622,12 @@ export function pruneJobs(): void {
       keptAny = true;
       continue;
     }
-    kept += transcriptBytes(dir, job);
-    if (kept > byteBudget) doomed.add(job.id);
+    const bytes = transcriptBytes(dir, job);
+    if (kept + bytes > byteBudget) {
+      doomed.add(job.id);
+      continue;
+    }
+    kept += bytes;
   }
 
   for (const id of doomed) removeJobFiles(dir, id);
@@ -630,9 +647,10 @@ export function pruneJobs(): void {
   }
 
   // Whatever survived on age alone is still unreachable, and it was charged
-  // nothing: three orphaned transcripts and an abandoned write held 800 KB
-  // against a 1 KB budget for the full seven days. Nothing can read them, so
-  // once the store is over budget they go first, whatever their age.
+  // nothing: three orphaned transcripts held 600 KB against a 1 KB budget for
+  // the full seven days. Nothing can read them, so once the store is over
+  // budget they go first, whatever their age. Abandoned temporaries are not in
+  // here -- they are removed outright above.
   let strayBytes = 0;
   for (const name of strays) {
     try { strayBytes += statSync(join(dir, name)).size; } catch { /* gone */ }

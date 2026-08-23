@@ -1675,12 +1675,13 @@ test("a record with a bad timeoutMs is rejected", () => {
   assert.equal(run(["status"]).stdout.trim(), "No Kiro jobs found.");
 });
 
-test("the byte budget stops at the first record that overflows it", () => {
+test("the byte budget keeps each older record that still fits", () => {
   const kiro = fakeEchoKiro();
   mkdirSync(jobsDir, { recursive: true });
-  // Documents the retention model deliberately: the newest run is kept
-  // unconditionally, then older ones only while the cumulative total fits. Once
-  // it is exceeded everything older goes, whether or not it would have fitted.
+  // Documents the retention model: the newest run is kept unconditionally and
+  // uncharged, then older ones newest-first while each still fits. Accumulating
+  // the bytes of records it had already dropped overstated the total, which then
+  // made the unreachable-file sweep fire on a store well inside its budget.
   const rows = [["new", 1000, 900], ["mid", 3000, 5000], ["old", 6000, 5]];
   for (const [n, age, bytes] of rows) {
     const ts = new Date(Date.now() - age).toISOString();
@@ -1691,8 +1692,10 @@ test("the byte budget stops at the first record that overflows it", () => {
     writeFileSync(join(jobsDir, `kiro-cum${n}-aa.out`), "s".repeat(bytes));
   }
   run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_MAX_JOBS: "50" });
-  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-cum") && f.endsWith(".json"));
-  assert.deepEqual(left, ["kiro-cumnew-aa.json"]);
+  const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-cum") && f.endsWith(".json")).sort();
+  // "mid" is 5000 bytes against a 1000-byte budget, so it goes; "old" is 5
+  // bytes and still fits, so it stays.
+  assert.deepEqual(left, ["kiro-cumnew-aa.json", "kiro-cumold-aa.json"]);
 });
 
 // --- Round-26 regressions ---
@@ -1967,4 +1970,41 @@ test("--base followed by a known flag still works", () => {
   const r = run(["review", "--base", "--wait", "the auth paths"], { KIRO_CLI_PATH: kiro });
   assert.match(r.stdout, /Compare against HEAD\./);
   assert.match(r.stdout, /Focus on: the auth paths\./);
+});
+
+// --- Round-32 regressions ---
+
+test("an abandoned temporary with a recycled pid is still removed", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // pid 1 is always alive, so liveness alone protected this for ever -- which
+  // is the state of any abandoned temporary after a reboot on a platform where
+  // tmpdir persists. It was also no longer charged against the byte budget.
+  const stale = join(jobsDir, ".tmp-1-1.tmp");
+  writeFileSync(stale, "z".repeat(500 * 1024));
+  const old = new Date(Date.now() - 30 * 60_000);
+  utimesSync(stale, old, old);
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_JOB_TTL_MS: "1" });
+  assert.equal(existsSync(stale), false, "an abandoned temporary survived");
+});
+
+test("a young unreachable transcript survives while the store is inside budget", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  for (const [n, age, bytes] of [["a", 9000, 10], ["b", 6000, 600], ["c", 3000, 600]]) {
+    const ts = new Date(Date.now() - age).toISOString();
+    writeFileSync(join(jobsDir, `kiro-acct${n}-aa.json`), JSON.stringify({
+      id: `kiro-acct${n}-aa`, kind: "review", status: "completed",
+      startedAt: ts, finishedAt: ts, resultBytes: bytes,
+    }));
+    writeFileSync(join(jobsDir, `kiro-acct${n}-aa.out`), "a".repeat(bytes));
+  }
+  writeFileSync(join(jobsDir, "kiro-younorph-aa.out"), "keep me");
+  run(["review"], {
+    KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000",
+    KIRO_PLUGIN_MAX_JOBS: "50", KIRO_PLUGIN_JOB_TTL_MS: "3600000",
+  });
+  // Counting the doomed records' bytes too made the sweep fire at 610 retained
+  // bytes against a 1000-byte budget, taking the young orphan with it.
+  assert.ok(readdirSync(jobsDir).includes("kiro-younorph-aa.out"), "a young orphan was swept prematurely");
 });
