@@ -104,7 +104,7 @@ const TMP_PREFIX = ".tmp-";
  * which is how a stray package.json came to be deleted.
  */
 const GENERATED_ID_RE = /^kiro-[0-9a-z]+-[0-9a-z]+$/;
-const TMP_RE = /^\.tmp-\d+-\d+\.tmp$/;
+const TMP_RE = /^\.tmp-(\d+)-\d+\.tmp$/;
 
 function requireId(id: string): void {
   if (!isValidJobId(id)) throw new Error(`invalid job id: ${id}`);
@@ -547,14 +547,14 @@ export function pruneJobs(): void {
   const strays: string[] = [];
 
   for (const name of names) {
-    if (TMP_RE.test(name)) {
-      // An abandoned write of ours. Nothing reads these, so age alone decides
-      // -- unless the store is over its byte budget, handled below.
-      if (ageOf(dir, name) > ttl) {
-        try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
-      } else {
-        strays.push(name);
-      }
+    const tmp = TMP_RE.exec(name);
+    if (tmp) {
+      // The name carries the writer's pid. While that process is alive this is
+      // an in-flight writeAtomic, and removing it makes its rename fail with
+      // ENOENT -- a finished run reported as never having recorded a result.
+      // Once the writer is gone the file is abandoned, whatever its age.
+      if (isPidAlive(Number(tmp[1]))) continue;
+      try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
       continue;
     }
     if (name.endsWith(OUT_EXT)) {

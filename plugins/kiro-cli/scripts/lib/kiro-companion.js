@@ -22,6 +22,8 @@ const SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/@^~{}-]*$/;
 export function isSafeRef(ref) {
     return SAFE_REF_RE.test(ref);
 }
+/** Flags a review may legitimately be followed by where a ref was expected. */
+const KNOWN_FLAGS = new Set(["--wait", "--background", "--base"]);
 function requireSafeRef(ref) {
     if (isSafeRef(ref))
         return ref;
@@ -63,6 +65,12 @@ export function buildReviewPrompt(rawArgs) {
             if (next !== undefined && next !== "" && !next.startsWith("-")) {
                 base = requireSafeRef(next);
                 i++;
+            }
+            else if (next !== undefined && next.startsWith("-") && !KNOWN_FLAGS.has(next)) {
+                // Not a ref, and not a flag we know either. Left alone it silently kept
+                // HEAD and reappeared in the focus text on the next iteration, while
+                // the --base=<value> form rejected the very same input.
+                requireSafeRef(next);
             }
             continue;
         }
@@ -453,7 +461,14 @@ export function cancel(args) {
         // No terminal record inside the settle window. Reporting success now would
         // be the very thing the rest of this function refuses to do, so escalate
         // and then check, rather than assume the SIGTERM landed.
-        if (isPidAlive(job.pid) && classifyPid(job.pid, job.id) === "ours") {
+        const after = isPidAlive(job.pid) ? classifyPid(job.pid, job.id) : "gone";
+        if (after === "unknown") {
+            // The probe failed this time round -- it forks ps on platforms without
+            // /proc and can lose under load. Unverified is not cancelled.
+            return (`Could not cancel job ${job.id}: its runner (pid ${job.pid}) could not be verified after ` +
+                `the signal, so nothing was recorded; it may still be running.`);
+        }
+        if (after === "ours") {
             try {
                 process.kill(-job.pid, "SIGKILL");
             }
@@ -467,7 +482,8 @@ export function cancel(args) {
             if (settled && settled.status !== "running") {
                 return `Cancelled job ${job.id} (recorded as ${settled.status})`;
             }
-            if (isPidAlive(job.pid) && classifyPid(job.pid, job.id) === "ours") {
+            const final = isPidAlive(job.pid) ? classifyPid(job.pid, job.id) : "gone";
+            if (final !== "gone" && final !== "foreign") {
                 return (`Could not cancel job ${job.id}: its runner (pid ${job.pid}) is still alive after ` +
                     `SIGTERM and SIGKILL. The job is left running.`);
             }

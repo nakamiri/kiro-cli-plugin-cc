@@ -1880,7 +1880,8 @@ test("unreachable bytes do not sit inside the byte budget", () => {
   for (const n of ["o1", "o2", "o3"]) {
     writeFileSync(join(jobsDir, `kiro-orph${n}-aa.out`), "o".repeat(200 * 1024));
   }
-  writeFileSync(join(jobsDir, ".tmp-4242-7.tmp"), "t".repeat(200 * 1024));
+  // Its pid is not alive, so this is an abandoned write rather than one in flight.
+  writeFileSync(join(jobsDir, ".tmp-4194304-7.tmp"), "t".repeat(200 * 1024));
   run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_JOB_TTL_MS: "3600000" });
   const left = readdirSync(jobsDir).filter((f) => f.startsWith("kiro-orph") || f.startsWith(".tmp-"));
   assert.deepEqual(left, [], `unreachable files survived: ${left}`);
@@ -1922,4 +1923,48 @@ test("cancel escalates to SIGKILL when SIGTERM is ignored", async () => {
   await new Promise((r) => setTimeout(r, 9000));
   assert.equal(existsSync(marker), false, "kiro-cli survived the cancellation");
   assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "cancelled");
+});
+
+// --- Round-31 regressions ---
+
+test("a temporary belonging to a live process is left alone", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // Named for this process, which is very much alive: an in-flight writeAtomic.
+  const inflight = join(jobsDir, `.tmp-${process.pid}-1.tmp`);
+  writeFileSync(inflight, "x".repeat(200 * 1024));
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_MAX_JOB_BYTES: "1000", KIRO_PLUGIN_JOB_TTL_MS: "3600000" });
+  // Removing it makes the writer's rename fail with ENOENT, and its finished
+  // run is then reported as never having recorded a result.
+  assert.ok(existsSync(inflight), "an in-flight temporary was deleted");
+});
+
+test("a temporary whose writer is gone is removed whatever its age", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  const abandoned = join(jobsDir, ".tmp-4194304-3.tmp");
+  writeFileSync(abandoned, "x");
+  run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "3600000" });
+  assert.equal(existsSync(abandoned), false, "an abandoned temporary survived");
+});
+
+// The overlap this guards against -- another process's writeAtomic losing its
+// rename to a prune -- is covered deterministically by "a temporary belonging to
+// a live process is left alone" above; driving it through two real runs instead
+// just races the byte budget against the job that is meant to survive.
+
+test("--base followed by an unknown flag is refused, not folded into the prompt", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base", "-x"], { KIRO_CLI_PATH: kiro });
+  // It used to keep HEAD silently and let "-x" reappear as focus text, while
+  // --base=-x rejected the very same input.
+  assert.match(r.stdout, /not a usable git ref/);
+  assert.doesNotMatch(r.stdout, /Focus on: -x/);
+});
+
+test("--base followed by a known flag still works", () => {
+  const kiro = fakeEchoKiro();
+  const r = run(["review", "--base", "--wait", "the auth paths"], { KIRO_CLI_PATH: kiro });
+  assert.match(r.stdout, /Compare against HEAD\./);
+  assert.match(r.stdout, /Focus on: the auth paths\./);
 });
