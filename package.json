@@ -10,7 +10,10 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "//test:macos": "Platform-specific suites, kept out of `test` (and so out of CI) on purpose: they assert the ps-based pid probe that only runs where there is no /proc. Run them on a macOS machine.",
+    "test:macos": "node --test tests/macos/*.test.mjs",
+    "test:all": "node --test tests/*.test.mjs tests/macos/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "22.12.0",
