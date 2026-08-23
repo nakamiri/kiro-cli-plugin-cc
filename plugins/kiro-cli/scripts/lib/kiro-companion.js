@@ -348,7 +348,7 @@ export function setup(args) {
     }
     const trust = info.trustAllTools
         ? "all tools trusted (set KIRO_PLUGIN_TRUST_ALL_TOOLS=0 to disable)"
-        : "tool trust disabled";
+        : "no tool trust -- Kiro runs non-interactively, so it can analyse but not change anything";
     return (`✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n` +
         `  Tool trust: ${trust}\n` +
         `  Foreground budget: ${info.foregroundTimeoutMs}ms ` +

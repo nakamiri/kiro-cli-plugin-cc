@@ -23,11 +23,17 @@ read and write files and run commands in your repository without prompting. That
 is what makes `/kiro-cli:rescue` able to actually fix things, but it means a
 Kiro run has the same reach over your working tree as you do.
 
-To require Kiro's own per-tool confirmations instead:
+To take that away:
 
 ```bash
 export KIRO_PLUGIN_TRUST_ALL_TOOLS=0
 ```
+
+This is not "ask me first". The plugin always runs `kiro-cli chat
+--no-interactive`, so there is nobody for Kiro to ask: without tool trust it
+analyses and reports, and changes nothing. That is what you want for
+`/kiro-cli:review`, and it makes `/kiro-cli:rescue` advisory -- it will explain
+what it would do rather than do it.
 
 The variable fails closed: once it is set, trust is kept only for an explicitly
 affirmative value (`1`, `true`, `yes`, `on`), so a typo reduces trust rather
@@ -68,7 +74,7 @@ per-user directory. On a shared host, keep sensitive context out of the prompt.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `KIRO_CLI_PATH` | resolved via `which kiro-cli` | Explicit path to the `kiro-cli` binary |
-| `KIRO_PLUGIN_TRUST_ALL_TOOLS` | enabled when unset | Once set, only `1`/`true`/`yes`/`on` keeps `--trust-all-tools`; anything else drops it |
+| `KIRO_PLUGIN_TRUST_ALL_TOOLS` | enabled when unset | Once set, only `1`/`true`/`yes`/`on` keeps `--trust-all-tools`; anything else drops it, leaving Kiro read-only |
 | `KIRO_PLUGIN_JOBS_DIR` | `$TMPDIR/kiro-plugin-cc-jobs-<uid>` (mode 0700) | Where background job records are stored |
 | `KIRO_PLUGIN_TIMEOUT_MS` | `300000` | Timeout for foreground runs (capped at 2147483647) |
 |  |  | `/kiro-cli:setup --json` reports `recommendedBashTimeoutMs` for this |

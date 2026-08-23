@@ -2210,3 +2210,41 @@ test("a genuine runner is still recognised", async () => {
   assert.equal(JSON.parse(run(["status", jobId]).stdout).status, "running");
   assert.match(run(["cancel", jobId]).stdout, new RegExp(`Cancelled job ${jobId}`));
 });
+
+// --- Round-38 regressions ---
+
+test("a future-dated record does not stay running", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // A clock stepped backwards mid-flight. Every elapsed-time test used to come
+  // out true, so the record stayed "running": uncancellable and unprunable.
+  const ahead = new Date(Date.now() + 3_600_000).toISOString();
+  writeFileSync(join(jobsDir, "kiro-future-aa.json"), JSON.stringify({
+    id: "kiro-future-aa", kind: "review", status: "running", startedAt: ahead,
+  }));
+  writeFileSync(join(jobsDir, "kiro-futpid-aa.json"), JSON.stringify({
+    id: "kiro-futpid-aa", kind: "review", status: "running", startedAt: ahead, pid: 4194304,
+  }));
+  assert.equal(JSON.parse(run(["status", "kiro-future-aa"]).stdout).status, "failed");
+  assert.equal(JSON.parse(run(["status", "kiro-futpid-aa"]).stdout).status, "failed");
+  assert.match(run(["cancel"]).stdout, /No running jobs to cancel/);
+});
+
+test("a record a moment ahead of the clock is tolerated", () => {
+  mkdirSync(jobsDir, { recursive: true });
+  // Ordinary jitter between two machines, or between two reads.
+  const barelyAhead = new Date(Date.now() + 2000).toISOString();
+  writeFileSync(join(jobsDir, "kiro-jitter-aa.json"), JSON.stringify({
+    id: "kiro-jitter-aa", kind: "review", status: "running", startedAt: barelyAhead,
+  }));
+  assert.equal(JSON.parse(run(["status", "kiro-jitter-aa"]).stdout).status, "running");
+});
+
+test("setup says what turning tool trust off actually does", () => {
+  const kiro = fakeEchoKiro();
+  const off = run(["setup"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TRUST_ALL_TOOLS: "0" }).stdout;
+  // The plugin always passes --no-interactive, so there is nobody to ask: this
+  // is a read-only Kiro, not a prompting one.
+  assert.match(off, /analyse but not change/);
+  const on = run(["setup"], { KIRO_CLI_PATH: kiro }).stdout;
+  assert.match(on, /all tools trusted/);
+});

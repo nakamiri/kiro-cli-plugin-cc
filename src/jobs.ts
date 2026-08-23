@@ -343,6 +343,24 @@ export function classifyPid(pid: number, jobId: string): PidVerdict {
  */
 const TMP_INFLIGHT_MS = 5 * 60_000;
 
+/** Clock jitter tolerated before a future-dated record is called unusable. */
+const CLOCK_SKEW_MS = 60_000;
+
+/**
+ * How long this record has been running, or null when that cannot be told.
+ * Guarding only against a non-finite value failed open on a negative age: a
+ * clock stepped backwards mid-flight left every elapsed-time test true, so a
+ * dead record read "running" -- uncancellable, unprunable, and the one `cancel`
+ * with no id would pick.
+ */
+function jobAgeMs(job: Job): number | null {
+  const started = Date.parse(job.startedAt);
+  if (!Number.isFinite(started)) return null;
+  const age = Date.now() - started;
+  if (age < -CLOCK_SKEW_MS) return null;
+  return Math.max(0, age);
+}
+
 /** Grace over a run's own budget before an unverifiable runner is called stale. */
 const STALE_SLACK_MS = 60_000;
 
@@ -375,9 +393,9 @@ export function reconcile(job: Job): Job {
     // The launcher writes the record before it knows the runner's pid, so there
     // is nothing to check liveness against in that window. A record that never
     // gained a pid means the launcher died in it.
-    const age = Date.now() - Date.parse(job.startedAt);
+    const age = jobAgeMs(job);
     // Fail closed: an unusable timestamp must not keep a job "running" forever.
-    if (Number.isFinite(age) && age <= PIDLESS_GRACE_MS) return job;
+    if (age !== null && age <= PIDLESS_GRACE_MS) return job;
     // finishedAt is deliberately left as stored -- usually absent. Synthesizing
     // "now" made one stale record look like the most recently finished job on
     // every read, shadowing every genuine result for the whole retention window.
@@ -389,9 +407,9 @@ export function reconcile(job: Job): Job {
   }
   if (isPidAlive(job.pid)) {
     const verdict = classifyPid(job.pid, job.id);
-    const age = Date.now() - Date.parse(job.startedAt);
+    const age = jobAgeMs(job);
     // Fail closed on an unusable age, as the pidless guard above does.
-    const withinBudget = Number.isFinite(age) && age <= staleAfterMs(job);
+    const withinBudget = age !== null && age <= staleAfterMs(job);
     // A supervisor that is alive and verifiably this job's is authoritative,
     // whatever the clock says: the job really is running. Judging it by elapsed
     // wall time instead was worse than the wedged runner it was meant to catch
