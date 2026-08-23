@@ -114,18 +114,19 @@ test("ps is asked for an untruncated line, so a long argv still matches", (t) =>
 
 test("an unreaped zombie is dead, not alive and not foreign", async (t) => {
   if (!NO_PROC) return t.skip("has /proc");
-  if (spawnSync("perl", ["-e", "1"]).status !== 0) return t.skip("no perl to hold a child unreaped");
   // kill(pid, 0) keeps succeeding for a zombie, so liveness alone cannot tell.
   // Reading the state letter is what lets a killed runner be noticed at once
   // instead of waiting out its budget; where that was /proc-only, the same
   // runner was called "foreign" -- asserting a pid recycling that never
   // happened -- or "ours", leaving the job uncancellable until it expired.
   //
-  // A parent that forks and never waits, so a killed child stays unreaped. It
-  // has to be one: a shell reaps its background jobs as soon as it reports
-  // their status, and Node reaps anything it spawned, so neither can hold a
-  // zombie still long enough to look at.
-  const holder = spawn("perl", ["-e", '$| = 1; my $p = fork(); if ($p == 0) { sleep 60; exit 0 } print "$p\\n"; sleep 60;'], {
+  // Holding a zombie still long enough to look at needs a parent that never
+  // waits, and the obvious candidates cannot: a shell reaps a background job as
+  // soon as it reports the job's status, and Node reaps anything it spawned.
+  // `exec` is the way out -- the shell forks the child, then replaces its own
+  // image with `sleep`, which keeps the child's parent alive at the same pid and
+  // never calls waitpid. Nothing here is beyond /bin/sh and sleep.
+  const holder = spawn("/bin/sh", ["-c", "sleep 30 & echo $! ; exec sleep 30"], {
     stdio: ["ignore", "pipe", "ignore"],
   });
   try {
