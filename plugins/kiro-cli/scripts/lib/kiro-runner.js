@@ -158,7 +158,36 @@ function finalize(status, result) {
     sweepGroup();
     process.exit(0);
 }
-const child = spawn(kiroPath, kiroArgs, { stdio: ["ignore", "pipe", "pipe"] });
+/**
+ * Last line of defence. This process is the only supervisor kiro-cli has: if it
+ * dies on an unexpected throw, kiro-cli and its descendants are left with no
+ * timeout and no cancel target, running under --trust-all-tools. Record what we
+ * can and take the group down with us.
+ */
+function bailOut(what, err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`kiro-runner: ${what}: ${message}`);
+    try {
+        finalize("failed", `${collected()}\n\nERROR: the Kiro supervisor failed (${what}): ${message}`);
+    }
+    catch {
+        sweepGroup();
+        process.exit(1);
+    }
+}
+process.on("uncaughtException", (err) => { bailOut("uncaught exception", err); });
+process.on("unhandledRejection", (err) => { bailOut("unhandled rejection", err); });
+let child;
+try {
+    child = spawn(kiroPath, kiroArgs, { stdio: ["ignore", "pipe", "pipe"] });
+}
+catch (e) {
+    // spawn throws synchronously for most errnos. Unguarded that escaped module
+    // evaluation, so no record was written and the group was never swept -- the
+    // same failure the launcher guards on its own spawn.
+    bailOut("could not start kiro-cli", e);
+    throw e; // unreachable: bailOut exits
+}
 spawned = child;
 /** How long to wait for the timeout kill to produce an exit before giving up. */
 const TIMEOUT_ESCAPE_MS = 5_000;
@@ -244,22 +273,3 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
         finalize("cancelled", `${collected()}\n\n[cancelled]`);
     });
 }
-/**
- * Last line of defence. This process is the only supervisor kiro-cli has: if it
- * dies on an unexpected throw, kiro-cli and its descendants are left with no
- * timeout and no cancel target, running under --trust-all-tools. Record what we
- * can and take the group down with us.
- */
-function bailOut(what, err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`kiro-runner: ${what}: ${message}`);
-    try {
-        finalize("failed", `${collected()}\n\nERROR: the Kiro supervisor failed (${what}): ${message}`);
-    }
-    catch {
-        sweepGroup();
-        process.exit(1);
-    }
-}
-process.on("uncaughtException", (err) => { bailOut("uncaught exception", err); });
-process.on("unhandledRejection", (err) => { bailOut("unhandled rejection", err); });

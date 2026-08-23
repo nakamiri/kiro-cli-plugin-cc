@@ -349,19 +349,16 @@ export function reconcile(job: Job): Job {
     const age = Date.now() - Date.parse(job.startedAt);
     // Fail closed on an unusable age, as the pidless guard above does.
     const withinBudget = Number.isFinite(age) && age <= staleAfterMs(job);
-    if (verdict === "ours") {
-      if (withinBudget) return job;
-      // Verified as ours, but past its own budget plus the grace. The runner
-      // enforces that budget itself, so it is wedged: reporting "running" for
-      // ever would make the record immune to every retention budget (pruning
-      // treats a running job as live) and leave status and result unable to
-      // resolve it.
-      return {
-        ...job,
-        status: "failed",
-        note: job.note ?? "ERROR: the Kiro runner is still alive but has outlived its timeout without recording a result.",
-      };
-    }
+    // A supervisor that is alive and verifiably this job's is authoritative,
+    // whatever the clock says: the job really is running. Judging it by elapsed
+    // wall time instead was worse than the wedged runner it was meant to catch
+    // -- a suspend/resume across a long run made the record read "failed" while
+    // the runner was still working, cancel then refused to signal it, and
+    // pruning deleted the record and transcript out from under it, after which
+    // the runner discarded its own output. A verified runner can always be
+    // stopped with `cancel`, which is the remedy for one that is stuck; only an
+    // unverifiable pid needs a bound, because that is the case cancel refuses.
+    if (verdict === "ours") return job;
     if (verdict === "unknown") {
       // Nothing here can be read (no /proc, no ps), so we cannot tell our runner
       // from a process that inherited its pid. Trusting it indefinitely made a
@@ -463,15 +460,21 @@ function migrateLegacyJobsDir(target: string): void {
   if (legacyMigrated) return;
   legacyMigrated = true;
   if (process.env.KIRO_PLUGIN_JOBS_DIR) return;
-  const uid = process.getuid?.();
-  if (uid === undefined) return;
   const legacy = join(tmpdir(), "kiro-plugin-cc-jobs");
   if (legacy === target) return;
+  // Not gated on having a uid: a platform without one is exactly the platform
+  // whose default path gained a suffix, so skipping it there left the
+  // pre-upgrade records invisible and unprunable on the only system that had
+  // to migrate. The ownership and mode checks below are what need a uid.
+  const uid = process.getuid?.();
   try {
     if (lstatSync(legacy).isSymbolicLink()) return;
     const st = statSync(legacy);
-    if (!st.isDirectory() || st.uid !== uid) return;
-    if ((st.mode & 0o077) !== 0) chmodSync(legacy, 0o700);
+    if (!st.isDirectory()) return;
+    if (uid !== undefined) {
+      if (st.uid !== uid) return;
+      if ((st.mode & 0o077) !== 0) chmodSync(legacy, 0o700);
+    }
   } catch {
     return; // not there, or not ours to touch
   }
@@ -496,7 +499,7 @@ function migrateLegacyJobsDir(target: string): void {
       renameSync(join(legacy, name), to);
       // rename keeps the old mode, and pre-0.1.0 records were written without
       // one -- so a migrated transcript of private source stayed 0644.
-      chmodSync(to, 0o600);
+      if (uid !== undefined) chmodSync(to, 0o600);
     } catch {
       /* leave it where it is */
     }

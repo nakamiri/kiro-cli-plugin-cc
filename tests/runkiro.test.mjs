@@ -1781,14 +1781,10 @@ test("an ordinary task is unaffected by the size guard", () => {
 
 // --- Round-28 regressions ---
 
-test("a verified runner that outlives its budget is not running for ever", () => {
+test("a verified live runner is trusted however long it has been running", () => {
   mkdirSync(jobsDir, { recursive: true });
-  // Alive and verifiably a runner for this job -- a supervisor wedged past its
-  // own budget. It used to be trusted indefinitely, which left the record
-  // immune to every retention budget and unresolvable by status and result.
   // The extra argv entries put "kiro-runner" and the job id in the process's
-  // command line, so the identity probe returns "ours" -- otherwise this would
-  // take the "foreign" branch and prove nothing about the budget bound.
+  // command line, so the identity probe returns "ours".
   const runnerish = spawn(
     process.execPath,
     ["-e", "setTimeout(()=>{}, 60000)", "kiro-runner.js", "kiro-wedged-aa"],
@@ -1803,9 +1799,12 @@ test("a verified runner that outlives its budget is not running for ever", () =>
     const cmdline = readFileSync(`/proc/${runnerish.pid}/cmdline`, "utf-8");
     assert.ok(cmdline.includes("kiro-runner") && cmdline.includes("kiro-wedged-aa"),
       `probe would not read this as ours: ${JSON.stringify(cmdline)}`);
-    const job = JSON.parse(run(["status", "kiro-wedged-aa"]).stdout);
-    assert.equal(job.status, "failed");
-    assert.match(job.note, /outlived its timeout/);
+    // Judging a verified supervisor by wall clock reported "failed" while it was
+    // still working, and pruning then deleted the record out from under it.
+    assert.equal(JSON.parse(run(["status", "kiro-wedged-aa"]).stdout).status, "running");
+    const kiro = fakeEchoKiro();
+    run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_JOB_TTL_MS: "1000", KIRO_PLUGIN_MAX_JOBS: "1" });
+    assert.ok(readdirSync(jobsDir).includes("kiro-wedged-aa.json"), "a live job's record was pruned");
   } finally {
     try { runnerish.kill("SIGKILL"); } catch { /* already gone */ }
   }
@@ -1841,3 +1840,31 @@ test("migrated records are not left world-readable", () => {
     assert.equal(statSync(join(moved, f)).mode & 0o077, 0, `${f} is still group/world readable`);
   }
 });
+
+// --- Round-29 regressions ---
+
+test("a runner that cannot start kiro-cli at all still records and sweeps", () => {
+  const kiro = fakeEchoKiro();
+  mkdirSync(jobsDir, { recursive: true });
+  // A directory is not executable, and spawn throws synchronously for EACCES-
+  // adjacent errnos. Unguarded at the top level that escaped module evaluation,
+  // leaving no record behind.
+  const notABinary = join(tmpDir, "a-directory");
+  mkdirSync(notABinary);
+  const r = run(["review", "--background"], { KIRO_CLI_PATH: notABinary });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  const { jobId } = JSON.parse(r.stdout);
+  const deadline = Date.now() + 10_000;
+  let job;
+  while (Date.now() < deadline) {
+    job = readJobs().find((j) => j.id === jobId);
+    if (job && job.status !== "running") break;
+  }
+  assert.ok(job, "no record written");
+  assert.equal(job.status, "failed");
+});
+
+// Dropping awaitResult's "had we seen it" flag is not a behaviour change on any
+// reachable path: startRunner writes the record before the wait begins, so it is
+// always present on the first poll. Removal part way through is covered by "a
+// foreground wait stops when its record is removed underneath it".

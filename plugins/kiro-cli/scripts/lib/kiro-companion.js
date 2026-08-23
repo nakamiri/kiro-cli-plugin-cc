@@ -219,18 +219,17 @@ function sleep(ms) {
  */
 async function awaitResult(id, timeoutMs) {
     const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
-    let seen = false;
     for (;;) {
         // Raw: the reconciling read runs a full identity probe, which forks ps on
         // every platform without /proc -- around 1500 times over a long review.
         // A dead runner is caught by the cheap liveness check below instead.
         let job = loadJobRaw(id);
-        if (job)
-            seen = true;
-        else if (seen) {
-            // It was there and now it is not -- pruning from a concurrent job start,
-            // or somebody clearing the store. Waiting out the budget and calling it a
-            // timeout would be a lie, and would throw away a run that had finished.
+        if (!job) {
+            // startRunner writes the record before this is ever reached, so a missing
+            // one means it went away -- pruning from a concurrent job start, or
+            // somebody clearing the store. Tracking whether we had seen it first only
+            // meant a record already gone on the first poll fell through to the
+            // deadline and reported a timeout that never happened.
             return `ERROR: the record for job ${id} disappeared while waiting for it; its output is not available.`;
         }
         if (job && job.status === "running" && job.pid !== undefined && !isPidAlive(job.pid)) {
