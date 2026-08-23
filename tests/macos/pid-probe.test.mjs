@@ -71,8 +71,8 @@ test("a pid nothing owns cannot be probed at all", (t) => {
 test("the identity check finds our runner in a ps command line", (t) => {
   if (!NO_PROC) return t.skip("has /proc");
   // ps returns one string, so argument boundaries are approximated by
-  // whitespace. That is enough only because the two entries matched on -- the
-  // runner's path and the job id -- are adjacent and contain no spaces.
+  // whitespace. Only the first mention of the script is matched on, which is
+  // what keeps that approximation from being forgeable -- see the next test.
   const child = spawnDetached(RUNNER_ARGV("kiro-macos001-aa"));
   try {
     assert.equal(classifyPid(child.pid, "kiro-macos001-aa"), "ours");
@@ -80,6 +80,33 @@ test("the identity check finds our runner in a ps command line", (t) => {
     // prompt merely mentioned another job's id used to be taken for that job,
     // and on a recycled pid that had cancel signalling the wrong group.
     assert.equal(classifyPid(child.pid, "kiro-macos002-aa"), "foreign");
+  } finally {
+    reap(child);
+  }
+});
+
+test("a prompt cannot forge the runner's own argument boundaries", (t) => {
+  if (!NO_PROC) return t.skip("has /proc");
+  // The /proc test of this asserts on `look at job <id> too`, which cannot match
+  // a check that requires adjacency. Here it can: without /proc the boundaries
+  // come from splitting ps output on whitespace, so a prompt containing
+  // `kiro-runner.js <id>` produces exactly the adjacent pair the check wants,
+  // and this one process answered "ours" for two different job ids. cancel's
+  // only guard before signalling a negated pid is that answer, so the second id
+  // could take down the first job's whole process group.
+  const child = spawnDetached([
+    ...RUNNER_ARGV("kiro-macos007-real"),
+    "1000", "/bin/kiro-cli", "chat",
+    "please", "look", "at", "kiro-runner.js", "kiro-macos007-fake", "as", "well",
+  ]);
+  try {
+    const info = pidInfo(child.pid);
+    assert.ok(
+      info.argv.includes("kiro-macos007-fake"),
+      `the forged pair never reached the command line: ${info.argv.join(" ")}`
+    );
+    assert.equal(classifyPid(child.pid, "kiro-macos007-real"), "ours");
+    assert.equal(classifyPid(child.pid, "kiro-macos007-fake"), "foreign");
   } finally {
     reap(child);
   }

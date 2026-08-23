@@ -144,14 +144,24 @@ test("a foreground timeout takes kiro-cli's descendants with it", async () => {
   // still writing to the repository under --trust-all-tools.
   writeFileSync(
     kiro,
-    `#!/bin/sh\ntrap '' TERM\n( sleep 4; touch "${marker}" ) &\nsleep 4\n`,
+    `#!/bin/sh\ntrap '' TERM\n( sleep 6; touch "${marker}" ) &\nsleep 6\n`,
     { mode: 0o755 }
   );
   const started = Date.now();
-  const r = run(["review"], { KIRO_CLI_PATH: kiro, KIRO_PLUGIN_TIMEOUT_MS: "800" });
+  // The sweep lands at timeout + flush grace, so the grace is pinned short and
+  // the descendant made long. On the defaults the two were 2.8s and 4.0s apart,
+  // and 1.2s of margin did not survive node:test running the files in parallel:
+  // this assertion failed for real there while passing on its own.
+  const r = run(["review"], {
+    KIRO_CLI_PATH: kiro,
+    KIRO_PLUGIN_TIMEOUT_MS: "800",
+    KIRO_PLUGIN_FLUSH_GRACE_MS: "200",
+  });
   assert.ok(Date.now() - started < 12_000, "the foreground wait was not bounded");
   assert.match(r.stdout, /ERROR/);
-  await new Promise((res) => setTimeout(res, 4500));
+  // Wait past the descendant's own deadline, measured from the run's start
+  // rather than from here, so a slow run does not shorten the window.
+  await new Promise((res) => setTimeout(res, Math.max(0, started + 7_500 - Date.now())));
   assert.equal(existsSync(marker), false, "a descendant outlived the timeout");
 });
 
@@ -178,6 +188,11 @@ test("a run killed by the timeout is still recorded as one", async () => {
   const job = await waitForJob((j) => j.id === jobId && j.status !== "running", 15_000);
   assert.equal(job.status, "failed");
   assert.match(resultOf(job.id), /timed out after 800ms/);
+  // The kill landed here, so the transcript must not hedge about it. The warning
+  // it would otherwise carry needs a SIGKILL that does not land -- EPERM against
+  // a child that changed uid, or an uninterruptible wait -- which cannot be
+  // arranged from outside the process, so only its absence is asserted.
+  assert.doesNotMatch(resultOf(job.id), /WARNING/);
 });
 
 // The pid-write failure path has no test: it needs the store to break between
