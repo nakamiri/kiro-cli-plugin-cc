@@ -8,15 +8,23 @@ const { setup, findKiro, dispatch } = await import("../plugins/kiro-cli/scripts/
 
 let tmpDir;
 let originalKiroPath;
+let originalJobsDir;
 
 beforeEach(() => {
   originalKiroPath = process.env.KIRO_CLI_PATH;
+  originalJobsDir = process.env.KIRO_PLUGIN_JOBS_DIR;
   tmpDir = mkdtempSync(join(tmpdir(), "kiro-setup-test-"));
+  // These tests reach the real launcher, which writes records and prunes the
+  // store. Without this they would do that in the developer's own job
+  // directory, and once past the retention cap delete genuine records from it.
+  process.env.KIRO_PLUGIN_JOBS_DIR = join(tmpDir, "jobs");
 });
 
 afterEach(() => {
   if (originalKiroPath === undefined) delete process.env.KIRO_CLI_PATH;
   else process.env.KIRO_CLI_PATH = originalKiroPath;
+  if (originalJobsDir === undefined) delete process.env.KIRO_PLUGIN_JOBS_DIR;
+  else process.env.KIRO_PLUGIN_JOBS_DIR = originalJobsDir;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -61,25 +69,24 @@ test("setup: human-readable output includes version", () => {
   assert.match(out, /kiro-cli 1\.2\.3/);
 });
 
-test("dispatch: routes to setup", () => {
+test("dispatch: routes to setup", async () => {
   process.env.KIRO_CLI_PATH = makeFakeKiro("kiro-cli 1.0.0");
-  const out = dispatch("setup", ["--json"]);
+  const out = await dispatch("setup", ["--json"]);
   const parsed = JSON.parse(out);
   assert.equal(parsed.installed, true);
 });
 
-test("dispatch: unknown command returns usage", () => {
-  const out = dispatch("nonsense", []);
+test("dispatch: unknown command returns usage", async () => {
+  const out = await dispatch("nonsense", []);
   assert.match(out, /Unknown command: nonsense/);
   assert.match(out, /Usage: kiro-companion/);
 });
 
-test("dispatch: 'task' alias routes to rescue", () => {
-  // rescue without kiro-cli should produce the not-installed error.
-  process.env.KIRO_CLI_PATH = "/path/to/nowhere/that-does-not-exist";
-  const out = dispatch("task", ["something"]);
-  // Will hit the runKiro path; with a bad path execSync throws and we get an error.
-  // We don't assert exact wording here, only that it doesn't throw and returns a string.
-  assert.equal(typeof out, "string");
-  assert.ok(out.length > 0);
+test("dispatch: 'task' alias routes to rescue", async () => {
+  // A configured kiro-cli that is not actually there must be reported, not
+  // thrown, and the run must be recorded as a failure rather than hang.
+  process.env.KIRO_CLI_PATH = join(tmpDir, "not-there");
+  const out = await dispatch("task", ["something"]);
+  assert.match(out, /ERROR/);
+  assert.match(out, /did not complete|could not run kiro-cli|ENOENT/);
 });
