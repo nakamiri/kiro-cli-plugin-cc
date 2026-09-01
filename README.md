@@ -85,6 +85,21 @@ per-user directory. On a shared host, keep sensitive context out of the prompt.
 | `KIRO_PLUGIN_MAX_JOBS` | `50` | Cap on retained finished job records |
 | `KIRO_PLUGIN_MAX_JOB_BYTES` | `67108864` | Cap on retained transcript bytes across all records |
 
+The rest are internal timings. They exist so the test suite can shorten them --
+the 30s version probe and the 10s PATH lookup alone cost it 40 seconds -- and
+are documented because a value that changes behaviour should be findable.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `KIRO_PLUGIN_VERSION_PROBE_MS` | `30000` | How long `setup` waits for `kiro-cli --version` |
+| `KIRO_PLUGIN_PATH_LOOKUP_MS` | `10000` | How long the `PATH` lookup for `kiro-cli` may take |
+| `KIRO_PLUGIN_CANCEL_SETTLE_MS` | `2000` | How long `cancel` lets a signalled runner record its own outcome |
+| `KIRO_PLUGIN_RECONCILE_MS` | `5000` | How often a foreground wait pays for a full reconciling read |
+| `KIRO_PLUGIN_FLUSH_GRACE_MS` | `2000` | How long the supervisor waits for the pipes to drain after kiro-cli exits |
+| `KIRO_PLUGIN_STDIN_STALL_MS` | `5000` | How long a single stall while reading stdin is tolerated |
+
+All six are capped at 2147483647, the `setTimeout` limit.
+
 Job records contain Kiro's full output, including source code from private
 repositories, so the jobs directory is per-user and not world-readable.
 Finished records are pruned when a new job starts -- by age, by count and by
