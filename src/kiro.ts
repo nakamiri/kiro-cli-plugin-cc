@@ -12,6 +12,19 @@ export function trustAllTools(): boolean {
   return ["1", "true", "yes", "on"].includes(v.trim().toLowerCase());
 }
 
+/**
+ * Whether to strip terminal control sequences from Kiro's output. On by
+ * default: the output is read in Claude Code, not a terminal, so the colours
+ * and cursor moves kiro-cli emits are literal noise there. Set to 0 to keep the
+ * raw bytes -- useful when the sequences themselves are what you are looking
+ * at, or to compare against what kiro-cli actually produced.
+ */
+export function stripOutputAnsi(): boolean {
+  const v = process.env.KIRO_PLUGIN_STRIP_ANSI;
+  if (v === undefined) return true;
+  return ["1", "true", "yes", "on"].includes(v.trim().toLowerCase());
+}
+
 export function chatArgs(prompt: string): string[] {
   const args = ["chat", "--no-interactive"];
   if (trustAllTools()) args.push("--trust-all-tools");
