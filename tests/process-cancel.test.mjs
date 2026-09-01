@@ -60,7 +60,12 @@ test("cancel keeps the output the runner had already captured", async () => {
   // at how long that takes: under a loaded machine running the other suites
   // alongside this one, a fixed pause cancelled before there was any output to
   // keep, and the test failed for a reason it was not about.
-  writeFileSync(kiro, `#!/bin/sh\necho "partial findings so far"\ntouch "${emitted}"\nsleep 30\n`, { mode: 0o755 });
+  // `exec`, so the process the plugin signals is the sleep itself. Without it
+  // the shell stays in the picture: a group SIGTERM reaches both, and when the
+  // sleep is reaped first the shell's last command has simply exited 143, so it
+  // ends normally and the runner records a failure rather than a cancellation.
+  // One run in fifteen. A real kiro-cli is a binary that dies on the signal.
+  writeFileSync(kiro, `#!/bin/sh\necho "partial findings so far"\ntouch "${emitted}"\nexec sleep 30\n`, { mode: 0o755 });
   const { jobId } = JSON.parse(run(["rescue", "--background", "go"], { KIRO_CLI_PATH: kiro }).stdout);
   await waitForJob((j) => j.id === jobId && typeof j.pid === "number");
   for (let i = 0; i < 100 && !existsSync(emitted); i++) await new Promise((r) => setTimeout(r, 50));
