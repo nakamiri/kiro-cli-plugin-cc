@@ -15,7 +15,12 @@
       "author": {
         "name": "nakamiri"
       },
-      "source": "./plugins/kiro-cli"
+      "source": {
+        "source": "git-subdir",
+        "url": "nakamiri/kiro-cli-plugin-cc",
+        "path": "plugins/kiro-cli",
+        "ref": "v0.2.0"
+      }
     }
   ]
 }
