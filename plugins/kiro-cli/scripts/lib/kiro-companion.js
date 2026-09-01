@@ -1,147 +1,432 @@
-import { execSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { execFileSync, spawn } from "node:child_process";
+import { readSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-export function getJobsDir() {
-    return process.env.KIRO_PLUGIN_JOBS_DIR || join(tmpdir(), "kiro-plugin-cc-jobs");
-}
-function ensureJobsDir() {
-    const dir = getJobsDir();
-    if (!existsSync(dir))
-        mkdirSync(dir, { recursive: true });
-}
+import { classifyPid, isPidAlive, listJobs, loadJob, loadJobRaw, pruneJobs, readJobResult, saveJob } from "./jobs.js";
+import { backgroundTimeoutMs, chatArgs, findKiro, foregroundTimeoutMs, nodeBinary, trustAllTools } from "./kiro.js";
+export { classifyPid, getJobsDir, isPidAlive, listJobs, loadJob, loadJobRaw, pidInfo, pruneJobs, readJobResult, saveJob, saveJobResult } from "./jobs.js";
+export { findKiro, nodeBinary, trustAllTools } from "./kiro.js";
+const NOT_INSTALLED = "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
 function genId() {
     return `kiro-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
-export function saveJob(job) {
-    ensureJobsDir();
-    writeFileSync(join(getJobsDir(), `${job.id}.json`), JSON.stringify(job, null, 2));
+export class InvalidArgument extends Error {
 }
-export function loadJob(id) {
-    const p = join(getJobsDir(), `${id}.json`);
-    if (!existsSync(p))
-        return null;
-    return JSON.parse(readFileSync(p, "utf-8"));
+/**
+ * Refs that are safe to put on a shell command line: no quotes, no `$`, no
+ * backticks, no whitespace, no separators -- and no braces, because `v1.{0..2}`
+ * is a brace expansion that becomes several words and would review against the
+ * wrong ref. Wide enough for real revisions (`origin/main`, `v1.2.3`,
+ * `HEAD~3`), narrow enough that quoting one cannot go wrong. The commands are
+ * told to check this before building the command line; enforcing it here makes
+ * the contract more than advice. Reflog syntax such as `HEAD@{1}` is the one
+ * casualty, which is not a base anyone reviews against.
+ */
+const SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/@^~-]*$/;
+export function isSafeRef(ref) {
+    return SAFE_REF_RE.test(ref);
 }
-export function listJobs() {
-    ensureJobsDir();
-    return readdirSync(getJobsDir())
-        .filter((f) => f.endsWith(".json"))
-        .map((f) => JSON.parse(readFileSync(join(getJobsDir(), f), "utf-8")))
-        .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+/** Flags a review may legitimately be followed by where a ref was expected. */
+const KNOWN_FLAGS = new Set(["--wait", "--background", "--base"]);
+function requireSafeRef(ref) {
+    if (isSafeRef(ref))
+        return ref;
+    throw new InvalidArgument(`${ref} is not a usable git ref. Use letters, digits and . _ / @ ^ ~ - only.`);
 }
-export function findKiro() {
-    if (process.env.KIRO_CLI_PATH)
-        return process.env.KIRO_CLI_PATH;
-    try {
-        const p = execSync("which kiro-cli", { encoding: "utf-8" }).trim();
-        return p || null;
-    }
-    catch {
-        return null;
-    }
+/**
+ * Everything after a bare `--` is literal text, never a flag or a flag's value.
+ * Free-form text arrives that way (see readArgsFromStdin), so a task that
+ * happens to read like an option -- or a `--base` with no ref of its own -- can
+ * neither be parsed as one nor swallow the text as its argument.
+ */
+export function splitArgs(args) {
+    const sep = args.indexOf("--");
+    if (sep === -1)
+        return { flags: args, literal: "" };
+    return { flags: args.slice(0, sep), literal: args.slice(sep + 1).join(" ") };
 }
-export function buildReviewPrompt(args) {
+export function buildReviewPrompt(rawArgs) {
+    const { flags: args, literal } = splitArgs(rawArgs);
     let base = "HEAD";
     const filtered = [];
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
         if (a === "--background" || a === "--wait")
             continue;
+        // --base=<ref> as well as --base <ref>: the joined form used to fall through
+        // into the focus text while the compared ref silently stayed HEAD.
+        if (a.startsWith("--base=")) {
+            const value = a.slice("--base=".length);
+            if (value !== "")
+                base = requireSafeRef(value);
+            continue;
+        }
         if (a === "--base") {
-            base = args[i + 1] ?? "HEAD";
-            i++;
+            const next = args[i + 1];
+            // Neither a flag nor an empty string is a git ref: "--base --background"
+            // used to make "--background" the ref, and "--base ''" produced the
+            // prompt "Compare against ." instead of falling back to HEAD.
+            if (next !== undefined && next !== "" && !next.startsWith("-")) {
+                base = requireSafeRef(next);
+                i++;
+            }
+            else if (next !== undefined && next.startsWith("-") && !KNOWN_FLAGS.has(next)) {
+                // Not a ref, and not a flag we know either. Left alone it silently kept
+                // HEAD and reappeared in the focus text on the next iteration, while
+                // the --base=<value> form rejected the very same input.
+                requireSafeRef(next);
+            }
             continue;
         }
         filtered.push(a);
     }
-    const extra = filtered.join(" ").trim();
+    const extra = [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
     let prompt = `Review the code changes. Compare against ${base}.`;
+    // Terminated, so the focus text does not run into the next sentence of the
+    // prompt -- but only when it does not already end a sentence itself, or
+    // "why is auth slow?" became "why is auth slow?.".
     if (extra)
-        prompt += ` Focus on: ${extra}`;
+        prompt += /[.!?:;]$/.test(extra) ? ` Focus on: ${extra}` : ` Focus on: ${extra}.`;
     prompt += " Provide a thorough code review covering correctness, security, performance, and style.";
     return prompt;
 }
-export function buildRescuePrompt(args) {
-    const filtered = args.filter((a) => !["--background", "--wait"].includes(a));
-    const task = filtered.join(" ").trim();
-    return task || "Investigate and fix the current issue.";
+/** The task text, or "" when none was given. Never a substitute for one. */
+export function buildRescuePrompt(rawArgs) {
+    const { flags, literal } = splitArgs(rawArgs);
+    const filtered = flags.filter((a) => !["--background", "--wait"].includes(a));
+    return [filtered.join(" ").trim(), literal.trim()].filter(Boolean).join(" ");
 }
 export function hasFlag(args, flag) {
-    return args.includes(flag);
+    // Only before the `--`: literal text that happens to read like a flag is not one.
+    return splitArgs(args).flags.includes(flag);
 }
-function runKiro(args, background = false) {
-    const kiro = findKiro();
-    if (!kiro) {
-        return "ERROR: kiro-cli is not installed or not in PATH. Run `/kiro-cli:setup` for help.";
+/**
+ * `--wait` wins over `--background`, which is the precedence the commands
+ * document. It was parsed nowhere, so asking to wait and getting a detached
+ * job was the actual behaviour.
+ */
+export function wantsBackground(args) {
+    return hasFlag(args, "--background") && !hasFlag(args, "--wait");
+}
+/**
+ * A signalled runner records its own outcome, including the output it had
+ * captured. Give it a moment to do so rather than overwriting it from here.
+ */
+const CANCEL_SETTLE_MS = 2_000;
+const CANCEL_POLL_MS = 50;
+/** The command surface is synchronous, so the wait has to be too. */
+function sleepSync(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function awaitRunnerRecord(id) {
+    const deadline = Date.now() + CANCEL_SETTLE_MS;
+    let last = null;
+    for (;;) {
+        try {
+            last = loadJobRaw(id);
+            if (!last || last.status !== "running")
+                return last;
+        }
+        catch {
+            // A read that fails is no answer. This runs after the signal has landed,
+            // so raising here would leave the record un-updated and the caller with a
+            // bare errno; keep polling and let the deadline decide.
+        }
+        if (Date.now() >= deadline)
+            return last;
+        sleepSync(CANCEL_POLL_MS);
     }
-    if (background) {
-        const job = { id: genId(), kind: args[0] ?? "task", status: "running", startedAt: new Date().toISOString() };
-        saveJob(job);
-        const prompt = args.join(" ");
-        const child = spawn(kiro, ["chat", "--no-interactive", "--trust-all-tools", prompt], {
-            stdio: ["ignore", "pipe", "pipe"],
-            detached: true,
-        });
-        job.pid = child.pid;
-        saveJob(job);
-        let output = "";
-        child.stdout?.on("data", (d) => { output += d.toString(); });
-        child.stderr?.on("data", (d) => { output += d.toString(); });
-        child.on("close", (code) => {
-            job.status = code === 0 ? "completed" : "failed";
-            job.finishedAt = new Date().toISOString();
-            job.result = output;
-            saveJob(job);
-        });
-        child.unref();
-        return JSON.stringify({ jobId: job.id, status: "started" });
-    }
+}
+function runnerPath() {
+    return fileURLToPath(new URL("./kiro-runner.js", import.meta.url));
+}
+/**
+ * Starts Kiro under a detached supervisor and returns the job, or an error
+ * string. Both execution modes go through here: the supervisor owns a process
+ * group, which is the only way a timeout can take kiro-cli's descendants with
+ * it, and the only way a job survives the caller exiting.
+ */
+function startRunner(kind, kiro, prompt, timeoutMs) {
+    const job = { id: genId(), kind, status: "running", startedAt: new Date().toISOString(), timeoutMs };
+    saveJob(job);
+    // Once per job, which is the natural point to keep the store bounded.
+    pruneJobs();
+    let child;
     try {
-        const prompt = args.join(" ");
-        const result = execSync(`${kiro} chat --no-interactive --trust-all-tools ${JSON.stringify(prompt)}`, {
-            encoding: "utf-8",
-            timeout: 300_000,
-            maxBuffer: 10 * 1024 * 1024,
-        });
-        return result;
+        child = spawn(nodeBinary(), [runnerPath(), job.id, String(timeoutMs), kiro, ...chatArgs(prompt)], { stdio: "ignore", detached: true });
     }
     catch (e) {
-        const err = e;
-        return `ERROR: ${err.stderr || err.message || "kiro-cli failed"}`;
+        // spawn does not only report failures asynchronously: an over-long argument
+        // throws E2BIG right here, which --args-stdin makes easy to reach. Without
+        // this the pre-spawn record sat "running" with no pid -- a phantom job for
+        // the whole pidless window, refused by cancel as "still starting".
+        const detail = `ERROR: could not start the Kiro runner: ${e.message}` +
+            ((e.code === "E2BIG")
+                ? ` The prompt is ${Buffer.byteLength(prompt)} bytes, which is too long to pass to a command.`
+                : "");
+        saveJob({ ...job, status: "failed", finishedAt: new Date().toISOString(), note: detail });
+        return detail;
     }
+    // spawn reports EAGAIN/EMFILE/EACCES asynchronously. Without a listener that
+    // event is fatal, and it would fire after dispatch() had already returned --
+    // outside its try/catch, so the command died with a stack trace.
+    child.on("error", (err) => {
+        try {
+            // Re-read first. This can also fire after a successful spawn, and during
+            // a foreground wait the runner may already have recorded a result --
+            // writing the pre-spawn snapshot over it would discard the run.
+            const current = loadJobRaw(job.id);
+            // Gone means somebody removed it; re-creating it would invent a job, which
+            // is the policy the runner's finalize states and enforces.
+            if (current === null || current.status !== "running")
+                return;
+            saveJob({
+                ...current,
+                status: "failed",
+                finishedAt: new Date().toISOString(),
+                note: `ERROR: could not start the Kiro runner: ${err.message}`,
+            });
+        }
+        catch {
+            /* nothing more we can do from here */
+        }
+    });
+    child.unref();
+    if (child.pid === undefined) {
+        const detail = "ERROR: could not spawn the Kiro runner process.";
+        saveJob({ ...job, status: "failed", finishedAt: new Date().toISOString(), note: detail });
+        return detail;
+    }
+    // The runner is its own process group leader, so cancel can signal the group.
+    job.pid = child.pid;
+    try {
+        // Re-read first, like the error handler above: a fast run can finalize
+        // before this write lands, and the pre-spawn snapshot would then replace a
+        // terminal record with "running" and a dead pid -- reporting a completed
+        // review as failed. A read that fails is not an answer either way, so it
+        // falls through to the write rather than to the "removed" branch below,
+        // which would kill a perfectly healthy runner.
+        let current = null;
+        try {
+            current = loadJobRaw(job.id);
+        }
+        catch {
+            // The state is unknown, and writing the pre-spawn snapshot over it would
+            // revert an already-finished record to "running" with a dead pid, turning
+            // a completed review into a failure with its transcript still on disk.
+            // Skipping the pid write only costs cancellability until the runner
+            // records the outcome itself, which is much the smaller loss.
+            return job;
+        }
+        if (current !== null && current.status !== "running")
+            return current;
+        if (current === null) {
+            // Removed between the first write and this one. Writing it back would
+            // resurrect a job nobody is tracking, so stop the runner instead.
+            try {
+                process.kill(-child.pid, "SIGKILL");
+            }
+            catch {
+                try {
+                    process.kill(child.pid, "SIGKILL");
+                }
+                catch { /* already gone */ }
+            }
+            return `ERROR: the record for job ${job.id} was removed while it was starting, so the run was stopped.`;
+        }
+        saveJob(job);
+    }
+    catch (e) {
+        // Without the pid on record the job is untrackable: cancel would report
+        // success without signalling anything while Kiro edited the repository.
+        // Stop it now rather than leave it running unattended.
+        try {
+            process.kill(-child.pid, "SIGKILL");
+        }
+        catch {
+            try {
+                process.kill(child.pid, "SIGKILL");
+            }
+            catch { /* already gone */ }
+        }
+        const detail = `ERROR: started the Kiro runner but could not record it, so it was stopped: ${e.message}`;
+        // Leave a terminal record, as the two sibling spawn-failure paths do.
+        // Without it the pre-spawn record stayed a pid-less "running": a phantom job
+        // in status for the whole launch window, refused by cancel as "still
+        // starting", exempt from every retention budget, and finally reconciled with
+        // a "never started" note that was not what happened.
+        try {
+            saveJob({ ...job, pid: undefined, status: "failed", finishedAt: new Date().toISOString(), note: detail });
+        }
+        catch {
+            /* the store is what failed in the first place */
+        }
+        return detail;
+    }
+    return job;
+}
+/** Slack over the runner's own budget before this side stops waiting. */
+const FOREGROUND_WAIT_SLACK_MS = 10_000;
+const FOREGROUND_POLL_MS = 200;
+/**
+ * How often the wait pays for a full reconciling read. The cheap liveness check
+ * below catches a runner whose pid is recorded and verifiably dead, but not one
+ * whose pid was never recorded, nor a recycled pid -- and in both of those the
+ * wait used to run the whole budget out and report a timeout that never
+ * happened. Reconciling on a schedule closes that without forking ps five times
+ * a second on the platforms where the identity probe costs a process.
+ */
+const FOREGROUND_RECONCILE_MS = 5_000;
+function sleep(ms) {
+    return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+/**
+ * Waits asynchronously on purpose. A synchronous wait (Atomics.wait) never
+ * yields to the event loop, so the runner -- still a child of this process in
+ * the foreground -- is never reaped: it lingers as a zombie, kill(pid, 0) keeps
+ * succeeding, and a runner that died without recording anything would hold the
+ * caller for the whole budget before reporting a timeout that never happened.
+ */
+async function awaitResult(id, timeoutMs) {
+    const deadline = Date.now() + timeoutMs + FOREGROUND_WAIT_SLACK_MS;
+    let nextReconcile = Date.now() + FOREGROUND_RECONCILE_MS;
+    for (;;) {
+        // Raw: the reconciling read runs a full identity probe, which forks ps on
+        // every platform without /proc -- around 1500 times over a long review.
+        // A dead runner is caught by the cheap liveness check below instead.
+        let job;
+        try {
+            job = loadJobRaw(id);
+            if (job && job.status === "running") {
+                const pidIsGone = job.pid !== undefined && !isPidAlive(job.pid);
+                if (pidIsGone || Date.now() >= nextReconcile) {
+                    nextReconcile = Date.now() + FOREGROUND_RECONCILE_MS;
+                    job = loadJob(id);
+                }
+            }
+        }
+        catch {
+            // Transient: one failed read is not the record going away, and giving up
+            // here abandoned a run that was progressing normally. The reconciling read
+            // is inside this guard for the same reason -- it reads the same file.
+            await sleep(FOREGROUND_POLL_MS);
+            continue;
+        }
+        if (!job) {
+            // startRunner writes the record before this is ever reached, so a missing
+            // one means it went away -- pruning from a concurrent job start, or
+            // somebody clearing the store. Tracking whether we had seen it first only
+            // meant a record already gone on the first poll fell through to the
+            // deadline and reported a timeout that never happened.
+            return `ERROR: the record for job ${id} disappeared while waiting for it; its output is not available.`;
+        }
+        if (job.status !== "running") {
+            const body = bodyOf(job);
+            if (job.status === "completed")
+                return body || "No output was recorded.";
+            // Keep whatever Kiro produced -- it may be a complete review -- but do
+            // not let a failed run read like a successful one.
+            const detail = `ERROR: kiro-cli did not complete: job ${id} is ${job.status}.`;
+            return body ? `${body}\n\n${detail}` : detail;
+        }
+        if (Date.now() >= deadline) {
+            return `ERROR: Kiro did not finish within ${timeoutMs}ms. It is recorded as job ${id}; check /kiro-cli:status.`;
+        }
+        await sleep(FOREGROUND_POLL_MS);
+    }
+}
+async function runKiro(kind, prompt, background) {
+    const kiro = findKiro();
+    if (!kiro)
+        return NOT_INSTALLED;
+    const timeoutMs = background ? backgroundTimeoutMs() : foregroundTimeoutMs();
+    const started = startRunner(kind, kiro, prompt, timeoutMs);
+    if (typeof started === "string")
+        return started;
+    if (background)
+        return JSON.stringify({ jobId: started.id, status: "started" });
+    return awaitResult(started.id, timeoutMs);
 }
 // --- Commands ---
 export function setup(args) {
     const kiro = findKiro();
     const json = args.includes("--json");
+    const foreground = foregroundTimeoutMs();
     const info = {
         installed: !!kiro,
         path: kiro,
         version: null,
+        runnable: false,
+        trustAllTools: trustAllTools(),
+        foregroundTimeoutMs: foreground,
+        // What a caller must allow a foreground run, budget plus this side's own
+        // slack. Reported rather than left to the commands to hard-code, since
+        // KIRO_PLUGIN_TIMEOUT_MS is configurable and a stale literal would have the
+        // caller kill the run before it could report anything.
+        recommendedBashTimeoutMs: foreground + FOREGROUND_WAIT_SLACK_MS + 10_000,
+        error: null,
     };
     if (kiro) {
         try {
-            info.version = execSync(`${kiro} --version`, { encoding: "utf-8" }).trim();
+            info.version = execFileSync(kiro, ["--version"], {
+                encoding: "utf-8",
+                timeout: 30_000,
+                // Without this the timeout only sends SIGTERM and then keeps waiting.
+                killSignal: "SIGKILL",
+                // execFileSync echoes the child's stderr to ours unless stdio is given,
+                // so a kiro-cli that warns on --version polluted this command's output.
+                stdio: ["ignore", "pipe", "pipe"],
+            }).trim();
+            info.runnable = true;
         }
-        catch { /* ignore */ }
+        catch (e) {
+            const err = e;
+            info.error = (err.stderr || err.message || "unknown error").trim();
+        }
     }
     if (json)
         return JSON.stringify(info);
     if (!info.installed)
         return "❌ kiro-cli is not installed.\n\nSee https://kiro.dev to download and install Kiro CLI.";
-    return `✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version ?? "unknown"}`;
+    // A path that resolves but cannot be executed is not "ready" -- say so.
+    if (!info.runnable) {
+        return `❌ kiro-cli was found at ${info.path} but could not be run.\n  Error: ${info.error}\n\nCheck the path (KIRO_CLI_PATH) and that the file is executable.`;
+    }
+    const trust = info.trustAllTools
+        ? "all tools trusted (set KIRO_PLUGIN_TRUST_ALL_TOOLS=0 to disable)"
+        : "no tool trust -- Kiro runs non-interactively, so it can analyse but not change anything";
+    return (`✓ kiro-cli is ready\n  Path: ${info.path}\n  Version: ${info.version}\n` +
+        `  Tool trust: ${trust}\n` +
+        `  Foreground budget: ${info.foregroundTimeoutMs}ms ` +
+        `(allow ${info.recommendedBashTimeoutMs}ms for a foreground run)`);
 }
 export function review(args) {
-    const prompt = buildReviewPrompt(args);
-    const bg = hasFlag(args, "--background");
-    return runKiro([prompt], bg);
+    return runKiro("review", buildReviewPrompt(args), wantsBackground(args));
 }
-export function rescue(args) {
-    const bg = hasFlag(args, "--background");
+export async function rescue(args) {
     const task = buildRescuePrompt(args);
-    return runKiro([task], bg);
+    if (task === "") {
+        // It used to fall back to "Investigate and fix the current issue." and hand
+        // that to Kiro under --trust-all-tools: a fabricated task, with the
+        // repository writable, standing in for one the user never gave.
+        return "ERROR: no task was given. Say what Kiro should investigate or fix.";
+    }
+    return runKiro("rescue", task, wantsBackground(args));
+}
+/**
+ * A job's output for display: the transcript, else its short note, else a plain
+ * statement that there was none. A transcript that exists but cannot be read is
+ * reported as such rather than as an absence of output.
+ */
+function bodyOf(job) {
+    let stored;
+    try {
+        stored = readJobResult(job.id);
+    }
+    catch (e) {
+        const size = job.resultBytes !== undefined ? `${job.resultBytes} bytes of` : "stored";
+        return `ERROR: job ${job.id} has ${size} output, but it could not be read: ${e.message}`;
+    }
+    return stored || job.note || "No output was recorded.";
 }
 export function status(args) {
     const id = args[0];
@@ -154,22 +439,40 @@ export function status(args) {
     const jobs = listJobs();
     if (jobs.length === 0)
         return "No Kiro jobs found.";
+    // Records carry only metadata and a short note, so this stays small however
+    // large the transcripts behind them are. /kiro-cli:result hands those over.
     return JSON.stringify(jobs.slice(0, 10), null, 2);
 }
 export function result(args) {
     const id = args[0];
     if (!id) {
-        const jobs = listJobs().filter((j) => j.status === "completed");
+        // Any finished run, not just a successful one. Filtering to "completed"
+        // meant that after a failed run this quietly handed back an *older* run's
+        // transcript, and the failed one was unreachable without its id.
+        // listJobs orders by startedAt; what matters here is which run finished
+        // last, or two overlapping background jobs hand back the stale transcript.
+        const jobs = listJobs()
+            .filter((j) => j.status !== "running")
+            .sort((a, b) => Date.parse(b.finishedAt ?? b.startedAt) - Date.parse(a.finishedAt ?? a.startedAt));
         if (jobs.length === 0)
-            return "No completed jobs found.";
-        return jobs[0].result ?? "No result stored.";
+            return "No finished jobs found.";
+        const latest = jobs[0];
+        const body = bodyOf(latest);
+        if (latest.status === "completed")
+            return body;
+        return `[job ${latest.id} (${latest.kind}) ${latest.status}]\n\n${body}`;
     }
     const job = loadJob(id);
     if (!job)
         return `No job found with ID: ${id}`;
     if (job.status === "running")
         return `Job ${id} is still running. Use /kiro-cli:status to check progress.`;
-    return job.result ?? "No result stored.";
+    const body = bodyOf(job);
+    // Same provenance line as the no-id path: presented bare, a partial
+    // transcript from an aborted run reads as a finished review.
+    if (job.status === "completed")
+        return body;
+    return `[job ${job.id} (${job.kind}) ${job.status}]\n\n${body}`;
 }
 export function cancel(args) {
     const id = args[0];
@@ -178,57 +481,264 @@ export function cancel(args) {
         const running = listJobs().filter((j) => j.status === "running");
         if (running.length === 0)
             return "No running jobs to cancel.";
-        job = running[0];
+        // Prefer one that can actually be cancelled. A launcher record that never
+        // recorded a pid is the newest for up to a minute, and picking it blocked
+        // cancelling an older job that really was running.
+        job = running.find((j) => j.pid !== undefined) ?? running[0];
     }
     else {
         job = loadJob(id);
         if (!job)
             return `No job found with ID: ${id}`;
     }
-    if (job.pid) {
-        try {
-            process.kill(job.pid);
-        }
-        catch { /* already dead */ }
+    // loadJob/listJobs reconcile a dead or never-started runner to "failed", so a
+    // job that still reads "running" here has a live pid or is inside the launch
+    // window -- either way we are not about to signal a stale one.
+    if (job.status !== "running") {
+        return `Job ${job.id} is already ${job.status}; nothing to cancel.`;
     }
-    job.status = "cancelled";
-    job.finishedAt = new Date().toISOString();
-    saveJob(job);
+    if (job.pid === undefined) {
+        // Inside the launch window: the launcher has written the record but has not
+        // reported a runner yet. Claiming a cancellation we cannot perform would
+        // leave Kiro working while the user believed it had stopped.
+        return `Could not cancel job ${job.id}: it is still starting and has no runner recorded yet. Try again in a moment.`;
+    }
+    const pid = job.pid;
+    /**
+     * What the pid is right now. "gone" and "dead" both mean the runner is no
+     * longer doing anything -- the second is a zombie, which isPidAlive still
+     * reports as alive and which in a container is the usual state of a runner
+     * that was just killed. They are grouped with "foreign" throughout: in none
+     * of the three is there anything left to signal.
+     */
+    const state = () => (isPidAlive(pid) ? classifyPid(pid, job.id) : "gone");
+    const finished = (v) => v === "gone" || v === "dead" || v === "foreign";
+    const before = state();
+    if (before === "unknown") {
+        // Signalling an unidentifiable pid could hit anything, but recording a
+        // cancellation we did not perform is worse: Kiro would keep working under
+        // --trust-all-tools while the user was told it had stopped, and its result
+        // would be discarded when the runner found a terminal record.
+        return (`Could not cancel job ${job.id}: its runner (pid ${pid}) cannot be identified on ` +
+            `this platform, so no signal was sent and the job is still running.`);
+    }
+    // Set only when we actually stopped the runner. Everything else falls through
+    // to reporting the state, never to stamping "cancelled".
+    let killed = false;
+    if (before === "ours") {
+        // Negated pid: the runner leads the group, so kiro-cli stops with it.
+        let signalError = "";
+        let signalled = false;
+        for (const target of [-pid, pid]) {
+            try {
+                process.kill(target, "SIGTERM");
+                signalled = true;
+                break;
+            }
+            catch (e) {
+                // EPERM, for instance: a runner belonging to another user, which
+                // isPidAlive reports as alive. Not something to paper over.
+                signalError = e.code ?? e.message;
+            }
+        }
+        // ESRCH is not a refusal: the runner finished between the check above and
+        // the signal, quite possibly having written its whole transcript. Reporting
+        // "signalling was refused; it is still running" for a completed run was
+        // simply wrong, so fall through and record the outcome instead.
+        if (!signalled && signalError !== "ESRCH") {
+            return (`Could not cancel job ${job.id}: signalling its runner (pid ${pid}) was refused` +
+                `${signalError ? ` (${signalError})` : ""}; it is still running.`);
+        }
+        if (signalled) {
+            // The runner records its own outcome, keeping the output captured so far.
+            let settled = awaitRunnerRecord(job.id);
+            if (settled && settled.status !== "running") {
+                return `Cancelled job ${job.id} (recorded as ${settled.status})`;
+            }
+            // No terminal record inside the settle window, so do not assume the
+            // SIGTERM landed: escalate and check.
+            const after = state();
+            if (finished(after))
+                killed = true;
+            if (after === "ours") {
+                for (const target of [-pid, pid]) {
+                    try {
+                        process.kill(target, "SIGKILL");
+                        break;
+                    }
+                    catch {
+                        /* try the narrower target, then give up */
+                    }
+                }
+                settled = awaitRunnerRecord(job.id);
+                if (settled && settled.status !== "running") {
+                    return `Cancelled job ${job.id} (recorded as ${settled.status})`;
+                }
+                const final = state();
+                if (final === "unknown") {
+                    // The probe lost this time. It may well be dead, but saying either
+                    // that it is still alive or that the job was cancelled is a guess.
+                    return (`Could not cancel job ${job.id}: its runner (pid ${pid}) could not be verified after ` +
+                        `SIGKILL, so nothing was recorded; it may already have stopped.`);
+                }
+                if (!finished(final)) {
+                    return (`Could not cancel job ${job.id}: its runner (pid ${pid}) is still alive after ` +
+                        `SIGTERM and SIGKILL. The job is left running.`);
+                }
+                killed = true;
+            }
+            else if (after === "unknown") {
+                // The probe failed this time round -- it forks ps on platforms without
+                // /proc and can lose under load. Unverified is not cancelled.
+                return (`Could not cancel job ${job.id}: its runner (pid ${pid}) could not be verified after ` +
+                    `the signal, so nothing was recorded; it may still be running.`);
+            }
+        }
+    }
+    if (!killed) {
+        // Nothing was signalled: the pre-check said the runner was already finished,
+        // or the signal came back ESRCH because it exited in between. Stamping
+        // "cancelled" here claimed an outcome we did not produce and overrode
+        // reconciliation's accurate verdict, so report the state instead.
+        let fresh;
+        try {
+            fresh = loadJob(job.id);
+        }
+        catch (e) {
+            return `Job ${job.id} could not be re-read: ${e.message}`;
+        }
+        if (fresh === null)
+            return `Job ${job.id} no longer exists; nothing was recorded.`;
+        if (fresh.status !== "running") {
+            return `Job ${job.id} had already stopped before it could be cancelled; it is ${fresh.status}.`;
+        }
+        return `Could not cancel job ${job.id}: nothing was signalled, and it still reads as running.`;
+    }
+    // Stopped by us but the runner did not record it: do that here, preserving
+    // whatever the stored record holds.
+    let base;
+    try {
+        base = loadJobRaw(job.id);
+    }
+    catch (e) {
+        // The signal has already landed, so say what is and is not known rather
+        // than surfacing a bare errno.
+        return (`Job ${job.id} was signalled, but its record could not be read to update it: ` +
+            `${e.message}`);
+    }
+    if (base === null) {
+        // Removed during the settle window. Re-creating it would invent a job.
+        return `Job ${job.id} no longer exists; nothing was recorded.`;
+    }
+    if (base.status !== "running") {
+        // The runner's own record landed just outside the settle window -- routine
+        // on a loaded host. We did stop it, so this is a success, not a refusal.
+        return `Cancelled job ${job.id} (recorded as ${base.status})`;
+    }
+    saveJob({ ...base, status: "cancelled", finishedAt: new Date().toISOString() });
     return `Cancelled job ${job.id}`;
 }
 // --- Main ---
-export function dispatch(command, args) {
-    switch (command) {
-        case "setup": return setup(args);
-        case "review": return review(args);
-        case "rescue":
-        case "task": return rescue(args);
-        case "status": return status(args);
-        case "result": return result(args);
-        case "cancel": return cancel(args);
-        default: return `Unknown command: ${command}\nUsage: kiro-companion <setup|review|rescue|status|result|cancel> [args...]`;
-    }
-}
-function isMain() {
-    if (!process.argv[1])
-        return false;
+/**
+ * Arguments are compared and forwarded as whole argv entries, never re-split.
+ * Splitting on whitespace would make prompt text that merely mentions a flag
+ * ("make --background the default") act as that flag, and would flatten the
+ * newlines and indentation of a multi-line task description.
+ */
+export async function dispatch(command, args) {
     try {
-        return import.meta.url === pathToFileURL(process.argv[1]).href;
+        switch (command) {
+            case "setup": return setup(args);
+            case "review": return await review(args);
+            case "rescue":
+            case "task": return await rescue(args);
+            case "status": return status(args);
+            case "result": return result(args);
+            case "cancel": return cancel(args);
+            default: return `Unknown command: ${command}\nUsage: kiro-companion <setup|review|rescue|status|result|cancel> [args...]`;
+        }
     }
-    catch {
-        return false;
+    catch (e) {
+        // Slash commands render stdout, so a stack trace on stderr would be invisible.
+        return `ERROR: ${e.message}`;
     }
 }
-// Also handle being invoked through the .mjs shim that imports this file.
+const ARGS_STDIN_FLAG = "--args-stdin";
+const STDIN_EAGAIN_BUDGET_MS = 5_000;
+/** Reads fd 0 to EOF, tolerating a non-blocking pipe. */
+function readAllStdin() {
+    const chunks = [];
+    const buf = Buffer.alloc(64 * 1024);
+    // Budgets the current stall, not the whole read: a writer that pauses part way
+    // through a long body would otherwise lose everything already received.
+    let deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
+    for (;;) {
+        let n;
+        try {
+            n = readSync(0, buf, 0, buf.length, null);
+        }
+        catch (e) {
+            const code = e.code;
+            // A pipe that is momentarily empty and non-blocking. Not an error yet.
+            if (code === "EAGAIN") {
+                if (Date.now() >= deadline)
+                    throw new Error("timed out waiting for input on stdin");
+                sleepSync(10);
+                continue;
+            }
+            if (code === "EOF")
+                break;
+            throw e;
+        }
+        if (n === 0)
+            break;
+        chunks.push(Buffer.from(buf.subarray(0, n)));
+        deadline = Date.now() + STDIN_EAGAIN_BUDGET_MS;
+    }
+    return Buffer.concat(chunks).toString("utf-8");
+}
+/**
+ * Slash commands can only interpolate their arguments into a shell command
+ * line, and getting free-form text through that intact is entirely down to
+ * quoting it correctly -- one apostrophe in "don't break the build" unbalances
+ * it, and the rest is word-split and expanded with no permission prompt because
+ * the Bash rule is pre-approved. With this flag the text arrives on stdin
+ * instead, where nothing can reinterpret it, and only flags stay in argv.
+ *
+ * It is appended after a `--` so that it cannot be read as a flag or taken as
+ * one's value. A read that fails is reported, never silently dropped: `rescue`
+ * would otherwise fall back to its generic "investigate the current issue"
+ * task and hand that to Kiro with full tool trust.
+ *
+ * Returns the arguments to dispatch, or an error string to print instead.
+ */
+function readArgsFromStdin(args) {
+    if (!args.includes(ARGS_STDIN_FLAG))
+        return args;
+    const rest = args.filter((a) => a !== ARGS_STDIN_FLAG);
+    if (process.stdin.isTTY) {
+        return `ERROR: ${ARGS_STDIN_FLAG} was given but stdin is a terminal; pass the text in on stdin.`;
+    }
+    let text;
+    try {
+        text = readAllStdin();
+    }
+    catch (e) {
+        return `ERROR: could not read arguments from stdin: ${e.message}`;
+    }
+    const trimmed = text.replace(/\n+$/, "");
+    return trimmed === "" ? rest : [...rest, "--", trimmed];
+}
 function isMainOrShim() {
-    if (isMain())
-        return true;
-    // The .mjs shim lives one level up at scripts/kiro-companion.mjs
-    if (!process.argv[1])
+    const invoked = process.argv[1];
+    if (!invoked)
         return false;
     try {
-        const invoked = fileURLToPath(pathToFileURL(process.argv[1]).href);
-        return invoked.endsWith("kiro-companion.mjs");
+        const href = pathToFileURL(invoked).href;
+        if (import.meta.url === href)
+            return true;
+        // The .mjs shim lives one level up at scripts/kiro-companion.mjs
+        return fileURLToPath(href).endsWith("kiro-companion.mjs");
     }
     catch {
         return false;
@@ -236,5 +746,6 @@ function isMainOrShim() {
 }
 if (isMainOrShim()) {
     const [command, ...commandArgs] = process.argv.slice(2);
-    console.log(dispatch(command, commandArgs));
+    const parsed = readArgsFromStdin(commandArgs);
+    console.log(typeof parsed === "string" ? parsed : await dispatch(command, parsed));
 }
