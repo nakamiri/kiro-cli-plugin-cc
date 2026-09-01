@@ -21,8 +21,12 @@ jobs:
       - run: pnpm build
       - name: Verify compiled lib matches source
         run: |
-          if ! git diff --quiet -- plugins/kiro-cli/scripts/lib; then
+          # --porcelain, not `git diff`: git diff cannot see a newly emitted but
+          # uncommitted file, which is exactly how a broken plugin would ship.
+          DIRTY=$(git status --porcelain -- plugins/kiro-cli/scripts/lib)
+          if [ -n "$DIRTY" ]; then
             echo "::error::compiled lib differs from committed output. Run 'pnpm build' and commit."
+            echo "$DIRTY"
             git diff -- plugins/kiro-cli/scripts/lib
             exit 1
           fi
