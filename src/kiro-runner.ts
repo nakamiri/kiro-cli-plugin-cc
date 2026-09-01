@@ -18,8 +18,9 @@
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+import { AnsiStripper } from "./ansi.js";
 import { loadJobRaw, saveJob, saveJobResult, type Job } from "./jobs.js";
-import { flushGraceMs, maxOutputBytes } from "./kiro.js";
+import { flushGraceMs, maxOutputBytes, stripOutputAnsi } from "./kiro.js";
 
 const [jobId, timeoutArg, kiroPath, ...kiroArgs] = process.argv.slice(2);
 
@@ -44,6 +45,7 @@ if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
 const FLUSH_GRACE_MS = flushGraceMs();
 
 const maxBytes = maxOutputBytes();
+const stripAnsiEnabled = stripOutputAnsi();
 let timedOut = false;
 let finalized = false;
 let bytes = 0;
@@ -53,6 +55,13 @@ const streamErrors: string[] = [];
 
 /** The captured output, with any stream diagnostics appended verbatim. */
 function collected(): string {
+  if (stripAnsiEnabled) {
+    // Whatever either stripper is still holding was never a sequence, so it is
+    // content and belongs in the transcript.
+    for (const held of [outStripper.end(), errStripper.end()]) {
+      if (held !== "") append(held, Buffer.byteLength(held));
+    }
+  }
   const body = chunks.join("");
   if (streamErrors.length === 0) return body;
   return `${body}\n\n[${streamErrors.join("; ")}]`;
@@ -291,8 +300,19 @@ const timer = setTimeout(() => {
 // across two pipe reads is not turned into replacement characters.
 child.stdout?.setEncoding("utf-8");
 child.stderr?.setEncoding("utf-8");
-child.stdout?.on("data", (d: string) => append(d, Buffer.byteLength(d)));
-child.stderr?.on("data", (d: string) => append(d, Buffer.byteLength(d)));
+// One stripper per stream: each holds its own half-finished sequence, and the
+// two are interleaved in `chunks`. The budget is charged on what is stored,
+// after stripping, because that is what a reader is handed.
+const outStripper = new AnsiStripper();
+const errStripper = new AnsiStripper();
+
+function take(stripper: AnsiStripper, chunk: string): void {
+  const text = stripAnsiEnabled ? stripper.write(chunk) : chunk;
+  if (text !== "") append(text, Buffer.byteLength(text));
+}
+
+child.stdout?.on("data", (d: string) => take(outStripper, d));
+child.stderr?.on("data", (d: string) => take(errStripper, d));
 // A stream error would otherwise be an unhandled 'error' event, and this
 // process must not die without tearing its group down.
 // Kept out of the capped body: charged at zero bytes they escaped the budget,

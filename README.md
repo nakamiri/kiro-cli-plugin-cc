@@ -60,6 +60,18 @@ and getting arbitrary text through that intact depends entirely on quoting it
 correctly -- one apostrophe in "don't break the build" unbalances it. A heredoc
 body is not interpreted at all, so there is nothing to get wrong.
 
+### Terminal control sequences
+
+kiro-cli colours its output and moves the cursor even under `--no-interactive`,
+so a run emits SGR colours, `?25l`/`?25h` and `1G`. That output is read in Claude
+Code rather than a terminal, where the sequences are literal `ESC[0m` noise, so
+they are removed as the output is captured -- a real review came to 7218 bytes
+raw and 5820 stripped. Newlines and tabs are kept; the other control characters
+go with the sequences.
+
+`KIRO_PLUGIN_STRIP_ANSI=0` stores the raw bytes instead, for when the sequences
+are what you are looking at.
+
 ### Prompts are visible in the process list
 
 Kiro CLI takes its prompt as a command-line argument, so for the duration of a
@@ -84,6 +96,7 @@ per-user directory. On a shared host, keep sensitive context out of the prompt.
 | `KIRO_PLUGIN_JOB_TTL_MS` | `604800000` | Age at which a finished job record is pruned |
 | `KIRO_PLUGIN_MAX_JOBS` | `50` | Cap on retained finished job records |
 | `KIRO_PLUGIN_MAX_JOB_BYTES` | `67108864` | Cap on retained transcript bytes across all records |
+| `KIRO_PLUGIN_STRIP_ANSI` | enabled when unset | Set to `0` to store Kiro's output with its terminal control sequences intact |
 
 The rest are internal timings. They exist so the test suite can shorten them --
 the 30s version probe and the 10s PATH lookup alone cost it 40 seconds -- and
