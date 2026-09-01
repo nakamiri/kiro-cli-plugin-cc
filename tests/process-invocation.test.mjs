@@ -133,7 +133,7 @@ test("a descendant that redirected its own stdio does not outlive the run", asyn
   // supervisor: the clean exit path was the one that left it running.
   writeFileSync(
     kiro,
-    `#!/bin/sh\necho "the review"\n( sleep 3; touch "${marker}" ) >/dev/null 2>&1 &\nexit 0\n`,
+    `#!/bin/sh\necho "the review"\n( sleep 3 && touch "${marker}" ) >/dev/null 2>&1 &\nexit 0\n`,
     { mode: 0o755 }
   );
   const { jobId } = JSON.parse(run(["review", "--background"], { KIRO_CLI_PATH: kiro }).stdout);

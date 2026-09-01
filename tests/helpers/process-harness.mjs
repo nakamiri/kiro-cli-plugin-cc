@@ -48,7 +48,7 @@ export function useProcessHarness() {
       // Only ever signal a real runner. Some fixtures deliberately record
       // process.pid to stand in for a recycled pid, and group-killing that
       // would take this test process down with it.
-      if (!isRunnerPid(job.pid)) continue;
+      if (!isRunnerPid(job.pid, job.id)) continue;
       try { process.kill(-job.pid, "SIGKILL"); } catch {
         try { process.kill(job.pid, "SIGKILL"); } catch { /* already gone */ }
       }
@@ -89,9 +89,19 @@ export function cmdlineOf(pid) {
   return ps.stdout ?? "";
 }
 
-export function isRunnerPid(pid) {
+/**
+ * Whether `pid` is the runner for `jobId`. The job id has to be checked, not
+ * just the script name: this is used to decide whether to SIGKILL a whole
+ * process group, and "some kiro-runner" is not the same claim as "the runner
+ * this record names". The product makes the same distinction in isRunnerFor,
+ * and for the same reason.
+ */
+export function isRunnerPid(pid, jobId) {
   if (pid === process.pid) return false;
-  return cmdlineOf(pid).includes("kiro-runner");
+  const argv = cmdlineOf(pid).trim().split(/\s+/);
+  const script = argv.findIndex((a) => a.endsWith("kiro-runner.js"));
+  if (script < 0) return false;
+  return jobId === undefined ? true : argv[script + 1] === jobId;
 }
 
 /**
@@ -140,10 +150,32 @@ export function fakeEchoKiro(name = "fake-kiro-cli") {
   return path;
 }
 
+/**
+ * A kiro-cli that is still working, and that says so when it finishes.
+ *
+ * Two properties the shape has to hold at once, and neither is free:
+ *
+ * The signal has to reach the sleep, not a shell above it. `exec` is what does
+ * that. Without it the shell stays in the picture, a group signal reaches both,
+ * and when the sleep is reaped first the shell's last command has merely exited
+ * 143 -- so the shell ends *normally* and the runner reads a non-zero exit
+ * rather than a signal, filing a deliberate cancellation as a failure. Measured
+ * at one run in fifteen; a real kiro-cli is a binary that dies on the signal.
+ *
+ * The post-work has to depend on the sleep *completing*, which is what `&&`
+ * gives. With `;` the subshell runs it as soon as its own sleep is killed --
+ * exactly what a cancellation or a timeout does to it -- so a marker meant to
+ * prove "this ran to completion" appeared milliseconds after the thing that
+ * stopped it.
+ */
 export function fakeSlowKiro(seconds, markerPath) {
   const path = join(dirs.tmp, "fake-slow-kiro");
-  const marker = markerPath ? `touch "${markerPath}"\n` : "";
-  writeFileSync(path, `#!/bin/sh\nsleep ${seconds}\n${marker}echo "slow done"\n`, { mode: 0o755 });
+  const marker = markerPath ? `touch "${markerPath}" && ` : "";
+  writeFileSync(
+    path,
+    `#!/bin/sh\n( sleep ${seconds} && ${marker}echo "slow done" ) &\nexec sleep ${seconds}\n`,
+    { mode: 0o755 }
+  );
   return path;
 }
 

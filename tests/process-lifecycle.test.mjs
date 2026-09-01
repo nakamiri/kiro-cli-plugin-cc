@@ -144,14 +144,17 @@ test("a foreground timeout takes kiro-cli's descendants with it", async () => {
   // still writing to the repository under --trust-all-tools.
   writeFileSync(
     kiro,
-    `#!/bin/sh\ntrap '' TERM\n( sleep 6; touch "${marker}" ) &\nsleep 6\n`,
+    `#!/bin/sh\ntrap '' TERM\n( sleep 6 && touch "${marker}" ) &\nsleep 6\n`,
     { mode: 0o755 }
   );
   const started = Date.now();
-  // The sweep lands at timeout + flush grace, so the grace is pinned short and
-  // the descendant made long. On the defaults the two were 2.8s and 4.0s apart,
-  // and 1.2s of margin did not survive node:test running the files in parallel:
-  // this assertion failed for real there while passing on its own.
+  // `&&`, not `;`: the marker has to mean "the descendant ran to completion".
+  // With `;` the subshell touched it as soon as its own `sleep` was killed --
+  // which is exactly what the group sweep does to it -- so the assertion failed
+  // whenever the kernel delivered SIGKILL to the sleep before the subshell,
+  // about one run in ten. It was reading the fixture's reaction to being killed
+  // as evidence of having survived. The grace is pinned short and the
+  // descendant made long so the two are far apart either way.
   const r = run(["review"], {
     KIRO_CLI_PATH: kiro,
     KIRO_PLUGIN_TIMEOUT_MS: "800",
