@@ -6,7 +6,7 @@
   "description": "Use Kiro CLI from Claude Code to review code or delegate tasks.",
   "license": "MIT",
   "engines": {
-    "node": ">=18.18.0"
+    "node": ">=24.0.0"
   },
   "scripts": {
     "build": "tsc",
@@ -16,7 +16,7 @@
     "test:all": "node --test tests/*.test.mjs tests/macos/*.test.mjs"
   },
   "devDependencies": {
-    "@types/node": "22.12.0",
+    "@types/node": "24.13.3",
     "typescript": "^5.7.0"
   }
 }
