@@ -144,6 +144,10 @@ Then run:
 
 If kiro-cli is not installed, see https://kiro.dev to download and install Kiro CLI.
 
+The marketplace entry pins the plugin to a release tag, so what you install is
+that tag rather than the tip of `main`. Changes merged to `main` reach you when
+they are released.
+
 ## Usage
 
 ### `/kiro-cli:review`
@@ -216,6 +220,26 @@ TypeScript source is in `src/`, compiled output goes to `plugins/kiro-cli/script
 | `src/kiro.ts` | Locating `kiro-cli`, building its argv, timeouts |
 | `src/jobs.ts` | Job store: metadata and transcripts, validation, liveness, pruning |
 | `src/kiro-runner.ts` | Detached supervisor that owns a Kiro run and its process group |
+
+### Releasing
+
+The marketplace entry points the plugin at a release tag
+(`plugins[0].source.ref`), so tagging is what makes a merged change reach users.
+
+1. In one PR, move the version everywhere it is written and the tag it will be
+   released under: `version` in `package.json`, `metadata.version` and
+   `plugins[0].version` in `.claude-plugin/marketplace.json`, `version` in
+   `plugins/kiro-cli/.claude-plugin/plugin.json`, and `plugins[0].source.ref` to
+   `v<version>`.
+2. Merge it, then tag that commit `v<version>` and push. `release.yml` refuses to
+   publish unless the tag and all four version fields agree, and it runs the
+   build, the compiled-output check and the suite before creating the release.
+3. `claude plugin tag plugins/kiro-cli --push` adds `kiro-cli--v<version>` at the
+   same commit. Claude Code lists tags of that shape when it resolves a plugin
+   version range.
+
+Between the merge and the tag push, `main` names a tag that does not exist yet,
+and an install started in that window fails. Push the tag right after merging.
 
 ### Tests
 
