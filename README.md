@@ -14,7 +14,7 @@ Use Kiro CLI from inside Claude Code for code reviews or to delegate tasks.
 ## Requirements
 
 - **Kiro CLI** installed and authenticated (`kiro-cli`)
-- **Node.js 18.18 or later**
+- **Node.js 24 or later**
 
 ## Tool trust
 

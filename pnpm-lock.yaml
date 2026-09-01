@@ -9,35 +9,35 @@ importers:
   .:
     devDependencies:
       '@types/node':
-        specifier: 22.12.0
-        version: 22.12.0
+        specifier: 24.13.3
+        version: 24.13.3
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
 
 packages:
 
-  '@types/node@22.12.0':
-    resolution: {integrity: sha512-Fll2FZ1riMjNmlmJOdAyY5pUbkftXslB5DgEzlIuNaiWhXd00FhWxVC/r4yV/4wBb9JfImTu+jiSvXTkJ7F/gA==}
+  '@types/node@24.13.3':
+    resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
 
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici-types@6.20.0:
-    resolution: {integrity: sha512-Ny6QZ2Nju20vw1SRHe3d9jVu6gJ+4e3+MMpqu7pqE5HT6WsTSlce++GQmK5UXS8mzV8DSYHrQH+Xrf2jVcuKNg==}
+  undici-types@7.18.2:
+    resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
 
 snapshots:
 
-  '@types/node@22.12.0':
+  '@types/node@24.13.3':
     dependencies:
-      undici-types: 6.20.0
+      undici-types: 7.18.2
 
   typescript@5.9.3: {}
 
-  undici-types@6.20.0: {}
+  undici-types@7.18.2: {}
 
 time:
-  '@types/node@22.12.0': '2025-01-28T02:01:21.274Z'
+  '@types/node@24.13.3': '2026-07-08T06:48:03.261Z'
   typescript@5.9.3: '2025-09-30T21:19:38.784Z'
