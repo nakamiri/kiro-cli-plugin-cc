@@ -720,9 +720,9 @@ function readAllStdin(): string {
  * instead, where nothing can reinterpret it, and only flags stay in argv.
  *
  * It is appended after a `--` so that it cannot be read as a flag or taken as
- * one's value. A read that fails is reported, never silently dropped: `rescue`
- * would otherwise fall back to its generic "investigate the current issue"
- * task and hand that to Kiro with full tool trust.
+ * one's value. A read that fails is reported, never silently dropped: dropping
+ * it would leave `rescue` with no task at all, and the caller would be told it
+ * refuses an empty task rather than that the read is what went wrong.
  *
  * Returns the arguments to dispatch, or an error string to print instead.
  */
