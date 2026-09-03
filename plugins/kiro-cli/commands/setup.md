@@ -1,8 +1,7 @@
 ---
 description: Check whether kiro-cli is installed and ready
 argument-hint: ''
-disable-model-invocation: true
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" setup*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs setup*)
 ---
 
 Run:

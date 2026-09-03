@@ -83,8 +83,9 @@ configurable (`KIRO_PLUGIN_TIMEOUT_MS`), so if it may have been changed, read
 node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" setup --json
 ```
 
-Run the script directly, as above -- `/kiro-cli:setup` is a user-invoked command
-and is not available to you.
+Run the script directly, as above. All you need from it is one number;
+`/kiro-cli:setup` exists to report readiness to the user, and running it here
+would put its install advice in front of them mid-review.
 
 `--background` makes the script print `{"jobId": "...", "status": "started"}`
 immediately. Report the job ID and tell the user to check `/kiro-cli:status`.

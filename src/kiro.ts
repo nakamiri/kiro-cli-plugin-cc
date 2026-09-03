@@ -117,12 +117,13 @@ export function maxRetainedJobBytes(): number {
 }
 
 /*
- * Internal timing seams. These are deliberately not documented in the README:
- * the defaults are the product's behaviour and there is no reason for an
- * operator to change them. They are configurable so the tests can exercise the
- * paths that depend on them -- a bounded probe, a settle window, a flush grace
- * -- without spending the whole default budget in real time. Waiting out the
- * 30s version probe and the 10s PATH lookup alone cost the suite 40 seconds.
+ * Internal timing seams. The defaults are the product's behaviour and there is
+ * no reason for an operator to change them; they are configurable so the tests
+ * can exercise the paths that depend on them -- a bounded probe, a settle
+ * window, a flush grace -- without spending the whole default budget in real
+ * time. Waiting out the 30s version probe and the 10s PATH lookup alone cost
+ * the suite 40 seconds. The README lists them all the same, on the grounds that
+ * a value which changes behaviour should be findable.
  */
 
 /** How long `setup` waits for `kiro-cli --version` before giving up. */

@@ -6,7 +6,7 @@
 // What is deliberately *not* here: that the plugin passes argv without a shell,
 // that free-form text really arrives on stdin, and that a prompt too long for
 // exec is reported. Those are properties of a spawned process, and they live in
-// runkiro.test.mjs.
+// process-invocation.test.mjs.
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
@@ -199,8 +199,8 @@ test("--background detaches unless --wait overrides it", () => {
 
 test("the prompt is one trailing argv entry, verbatim", () => {
   // Passed through a shell, any of these would have been split, expanded or
-  // executed. chatArgs is what keeps it a single entry; runkiro.test.mjs proves
-  // the spawn itself uses no shell.
+  // executed. chatArgs is what keeps it a single entry;
+  // process-invocation.test.mjs proves the spawn itself uses no shell.
   for (const prompt of [
     "fix the $(id -u) and `hostname` bug",
     'a "quoted" thing; echo pwned',

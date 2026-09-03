@@ -16,6 +16,28 @@ Use Kiro CLI from inside Claude Code for code reviews or to delegate tasks.
 - **Kiro CLI** installed and authenticated (`kiro-cli`)
 - **Node.js 24 or later**
 
+## Who can start a run
+
+Four of the commands run only when you type them. Two do not: `/kiro-cli:setup`
+and `/kiro-cli:rescue` are also reachable by Claude itself, so Claude can decide
+on its own to check that kiro-cli is ready, or to hand a task to Kiro.
+
+`setup` only reports. `rescue` does not -- it starts a Kiro run with tool trust,
+which can write to your working tree. Taking the trust away does not stop Claude
+from starting a rescue; it means the run it starts can only analyse and report.
+
+A command's `allowed-tools` is a grant, not a limit: the tools it names are
+pre-approved for the turn that runs the command, and that grant reaches the
+subagent the command delegates to. So a model-reachable command is also a way
+for Claude to hand itself those tools without asking. Both of these name the
+companion script exactly rather than allowing `node` in general, which keeps
+that grant to the one program the command actually runs. `rescue` grants `Agent`
+as well, because delegating to its subagent is the whole of what it does. That
+one is not narrowed: it names no `subagent_type`, so the turn can start any
+subagent, not only `kiro-cli:kiro-rescue`. The four typed-only commands, `review`
+in particular, still pre-approve `node` broadly -- but only from the turn you
+started by typing them.
+
 ## Tool trust
 
 By default the plugin invokes `kiro-cli chat --trust-all-tools`, which lets Kiro
@@ -121,7 +143,9 @@ never pruned.
 
 A store left at the pre-`0.1.0` path (`$TMPDIR/kiro-plugin-cc-jobs`, without the
 per-user suffix) is tightened and its records moved into the current one the
-first time any command runs. Files the plugin did not write are left untouched.
+first time a command opens the store. `setup` never does, so a session that only
+checks readiness leaves the old path alone. Files the plugin did not write are
+left untouched.
 
 ## Install
 
@@ -175,8 +199,9 @@ gigabytes; `/kiro-cli:result` is what reads a transcript.
 
 ### `/kiro-cli:rescue`
 
-Hands a task to Kiro CLI. A task is required -- with none given the command
-reports an error rather than inventing one.
+Hands a task to Kiro CLI. A task is required: with none given the command asks
+what Kiro should look at rather than inventing one, and the script underneath
+refuses an empty task outright.
 
 ```
 /kiro-cli:rescue investigate why the tests are failing
@@ -220,6 +245,7 @@ TypeScript source is in `src/`, compiled output goes to `plugins/kiro-cli/script
 | `src/kiro.ts` | Locating `kiro-cli`, building its argv, timeouts |
 | `src/jobs.ts` | Job store: metadata and transcripts, validation, liveness, pruning |
 | `src/kiro-runner.ts` | Detached supervisor that owns a Kiro run and its process group |
+| `src/ansi.ts` | Stripping terminal control sequences out of Kiro's output |
 
 ### Releasing
 
@@ -244,10 +270,12 @@ and an install started in that window fails. Push the tag right after merging.
 ### Tests
 
 `pnpm test` runs `tests/*.test.mjs`, which is what CI runs. Most of it is
-in-process: `args.test.mjs`, `jobs.test.mjs` and `store.test.mjs` call the
-exported functions directly, and the three `process-*.test.mjs` files spawn real
-processes for the things only a process can show -- detachment, signals, pid
-identity, pipes and timeouts.
+in-process: `ansi`, `args`, `jobs` and `store` call the exported functions
+directly. The three `process-*.test.mjs` files spawn real processes for the
+things only a process can show -- detachment, signals, pid identity, pipes and
+timeouts -- and `e2e.test.mjs` runs the companion as a command.
+`setup.test.mjs` sits between the two: it calls the exported functions, but some of them reach the
+real launcher.
 
 | Command | Runs |
 | --- | --- |

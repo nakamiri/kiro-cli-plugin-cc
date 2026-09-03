@@ -323,7 +323,7 @@ test("cancel refuses a record that is not running, and does not claim otherwise"
   // --trust-all-tools while the user was told it had stopped, and its result
   // would then be discarded when the runner found a terminal record.
   // That nothing is actually signalled is a property of a process, and is
-  // asserted in runkiro.test.mjs against a child's own pid.
+  // asserted in process-cancel.test.mjs against a child's own pid.
   const cases = {
     "kiro-finished1-aa": { status: "completed", pid: process.pid, expect: /already completed; nothing to cancel/ },
     "kiro-foreign01-aa": { status: "running", pid: process.pid, expect: /already failed; nothing to cancel/ },
