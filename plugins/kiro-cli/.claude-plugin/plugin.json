@@ -1,6 +1,6 @@
 {
   "name": "kiro-cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Use Kiro CLI from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "nakamiri"
