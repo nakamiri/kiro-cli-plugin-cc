@@ -46,6 +46,18 @@ KIRO_ARGS_<pick-your-own>
   read `recommendedBashTimeoutMs` from
   `node "${CLAUDE_PLUGIN_ROOT}/scripts/kiro-companion.mjs" setup --json` and use
   that. With `--background` the call returns at once and needs no extra timeout.
+- Keep the quotes around the script path, as shown above. Nothing guarantees the
+  plugin's own directory has no space in it -- it sits under the home directory,
+  and a marketplace can be added from any local path. Under `bash` or `sh` an
+  unquoted path containing one splits into two arguments and node is handed a
+  file that does not exist; `zsh` does not split it. Quoted, it is right under
+  either, which is the point: you do not have to know which shell you are in.
 - Return the stdout of the command exactly as-is.
-- Do not inspect the repository, read files, or do any independent work.
+- If the call is refused, asks for permission, or fails, return what you were
+  told, verbatim, and stop there. Never answer the request yourself instead. A
+  forward that could not be made is a useful answer; the same words assembled by
+  reading the repository yourself are indistinguishable from a Kiro run, and the
+  caller cannot tell that Kiro never ran.
+- Do not inspect the repository, read files, or do any independent work. This
+  holds after a failure too, which is when it is most tempting to break it.
 - Do not paraphrase, summarize, or add commentary.
