@@ -172,6 +172,23 @@ The marketplace entry pins the plugin to a release tag, so what you install is
 that tag rather than the tip of `main`. Changes merged to `main` reach you when
 they are released.
 
+### Moving to a newer release
+
+Update the marketplace first. `/plugin update` on its own reports nothing to do,
+because the release tag it would install is named in a `marketplace.json` that
+Claude Code holds a local clone of, and that clone is still on the old release:
+
+```bash
+/plugin marketplace update kiro-cli-plugin-cc
+/reload-plugins
+```
+
+The marketplace name is `kiro-cli-plugin-cc`, not the `owner/repo` slug that
+added it. Updating the marketplace usually installs the new release with it --
+`1 plugin bumped` in the output means it did, and `/plugin update
+kiro-cli@kiro-cli-plugin-cc` finishes the job when it does not. `/reload-plugins`
+is enough to pick up either; the session does not have to be restarted.
+
 ## Usage
 
 ### `/kiro-cli:review`
@@ -274,8 +291,10 @@ in-process: `ansi`, `args`, `jobs` and `store` call the exported functions
 directly. The three `process-*.test.mjs` files spawn real processes for the
 things only a process can show -- detachment, signals, pid identity, pipes and
 timeouts -- and `e2e.test.mjs` runs the companion as a command.
-`setup.test.mjs` sits between the two: it calls the exported functions, but some of them reach the
-real launcher.
+`setup.test.mjs` sits between the two: it calls the exported functions, but some
+of them reach the real launcher. `commands.test.mjs` runs none of the plugin's
+code at all -- it reads the command files' frontmatter, which is where the
+permission decisions live.
 
 | Command | Runs |
 | --- | --- |

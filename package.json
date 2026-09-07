@@ -1,6 +1,6 @@
 {
   "name": "@nakamiri/kiro-cli-plugin-cc",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Use Kiro CLI from Claude Code to review code or delegate tasks.",
